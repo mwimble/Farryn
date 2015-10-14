@@ -1,0 +1,14 @@
+model: farryn
+M1_P: 226.3538
+M2_P: 267.1718
+M1_I: 13.35421
+M2_I: 14.51053
+M1_QPPS: 2810
+M2_QPPS: 2810
+AXLE_WIDTH: 5.0
+motor_usb_port: /dev/ttyACM0
+
+KP_velocity: 15
+frw_vel_topic: /summit_xl/joint_frw_velocity_controller/command
+
+cmd_vel_topic: /cmd_vel
