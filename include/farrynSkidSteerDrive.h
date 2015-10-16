@@ -15,6 +15,7 @@
 #include <boost/bind.hpp>
 
 #include "farryn_controller/FarrynConfig.h"
+#include "farryn_controller/RoboClawStatus.h"
 
 using namespace std;
 
@@ -33,11 +34,15 @@ public:
 
 	void configCallback(farryn_controller::FarrynConfig &config, uint32_t level);
 
+	uint16_t getErrorStatus();
+
 	float getLogicBatteryLevel();
 
 	int32_t getM1Encoder();
 
 	int32_t getM2Encoder();
+
+	string getVersion();
 
 	void stop();
 
@@ -45,7 +50,7 @@ private:
 	double	updateRate_;
 	double	updatePeriod_;
 
-	pthread_mutex_t roboClawLock; // Mutex for access to roboclaw via USB.
+	boost::mutex roboClawLock; // Mutex for access to roboclaw via USB.
 	boost::thread roboClawStatusReaderThread; // Periodically read and publish RoboClaw status.
 
 	typedef struct {
@@ -120,6 +125,8 @@ private:
 	int MAX_COMMAND_RETRIES;
 	bool DEBUG;
 
+	farryn_controller::RoboClawStatus 	roboClawStatus;
+
 	float M1_P;
 	float M2_P;
 	float M1_I;
@@ -146,6 +153,8 @@ private:
 	void cmdVelCallback(const geometry_msgs::Twist::ConstPtr& cmd_msg);
 	
 	void drive(float velocity, float angle);
+
+	void flush();
 
 	unsigned short get2ByteCommandResult(uint8_t command);
 
