@@ -234,13 +234,20 @@ void FarrynSkidSteerDrive::drive(float velocity, float angle) {
 		 << ", m2_speed: " << m2_speed
 		 << ", m2_max_distance: " << m2_max_distance);
 	boost::mutex::scoped_lock scoped_lock(roboClawLock);
-	writeN(true, 19, portAddress, MIXEDSPEEDDIST,
-		   SetDWORDval(m1_speed),
-		   SetDWORDval(m1_max_distance),
-		   SetDWORDval(m2_speed),
-		   SetDWORDval(m2_max_distance),
-		   1 /* Cancel any previous command */
-		   );
+	int retry;
+	for (retry = 0; retry < MAX_COMMAND_RETRIES; retry++) {
+		try {
+			writeN(true, 19, portAddress, MIXEDSPEEDDIST,
+				   SetDWORDval(m1_speed),
+				   SetDWORDval(m1_max_distance),
+				   SetDWORDval(m2_speed),
+				   SetDWORDval(m2_max_distance),
+				   1 /* Cancel any previous command */
+				   );
+		} catch (TRoboClawException* e) {
+			ROS_ERROR("[FarrynSkidSteerDrive::drive] Exception: %s, retry number %d", e->what(), retry);
+		}
+	}
 }
 
 void FarrynSkidSteerDrive::flush() {
