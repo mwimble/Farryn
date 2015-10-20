@@ -118,12 +118,7 @@ FarrynSkidSteerDrive::FarrynSkidSteerDrive() {
 	stop();
 	
 	roboClawStatusReaderThread = boost::thread(boost::bind(&FarrynSkidSteerDrive::roboClawStatusReader, this));
-
-	// int threadError = pthread_create(&roboClawStatusReader, NULL, &roboClawStatusReaderThread, NULL);
-	// if (threadError != 0) {
-	// 	ROS_FATAL_STREAM("[FarrynSkidSteerDrive::FarrynSkidSteerDrive] pthread_create for RoboClaw status reader failed");
-	// 	throw new TRoboClawException("[FarrynSkidSteerDrive::FarrynSkidSteerDrive] pthread_create for RoboClaw status reader failed");
-	// }
+	roboClawMotorControllerThread = boost::thread(boost::bind(&FarrynSkidSteerDrive::robotMotorController, this));
 
 	setM1PID(M1_P, M1_I, 0, M1_QPPS);
 	setM2PID(M2_P, M2_I, 0, M2_QPPS);
@@ -155,9 +150,13 @@ FarrynSkidSteerDrive::~FarrynSkidSteerDrive() {
 
 void FarrynSkidSteerDrive::cmdVelCallback(const geometry_msgs::Twist::ConstPtr& cmd_msg) {
 	ROS_INFO("[FarrynSkidSteerDrive::cmdVelCallback] cmd_msg.linear.x: %f, cmd_msg.angular.z: %f", cmd_msg->linear.x, cmd_msg->angular.z);
-	float velocity = cmd_msg->linear.x;
-	float angle = cmd_msg->angular.z;
-	drive(velocity, angle);
+	geometry_msgs::Twist copy;
+	copy.linear.x = cmd_msg->linear.x;
+	copy.angular.z = cmd_msg->angular.z;
+	twistQueue.Produce(copy);
+	// float velocity = cmd_msg->linear.x;
+	// float angle = cmd_msg->angular.z;
+	// drive(velocity, angle);
 }
 
 void FarrynSkidSteerDrive::configCallback(farryn_controller::FarrynConfig &config, uint32_t level) {
@@ -611,6 +610,25 @@ string FarrynSkidSteerDrive::getVersion() {
 	throw new TRoboClawException("[FarrynSkidSteerDrive::getVersion] RETRY COUNT EXCEEDED");
 }
 
+void FarrynSkidSteerDrive::queueThread() {
+	static const double timeout = 0.01;
+
+	while (alive && rosNode->ok()) {
+		queue.callAvailable(ros::WallDuration(timeout));
+	}
+}
+
+void FarrynSkidSteerDrive::robotMotorController() {
+    while (1) {
+        geometry_msgs::Twist cmd_msg;
+        twistQueue.Consume(cmd_msg);
+        float velocity = cmd_msg.linear.x;
+        float angle = cmd_msg.angular.z;
+        drive(velocity, angle);
+        usleep(1000);
+    }
+}
+
 void FarrynSkidSteerDrive::roboClawStatusReader() {
 	ROS_INFO("FarrynSkidSteerDrive::roboClawStatusReader start");
 	ros::Publisher statusPublisher = rosNode->advertise<farryn_controller::RoboClawStatus>("/RoboClawStatus", 1);
@@ -698,14 +716,6 @@ void FarrynSkidSteerDrive::roboClawStatusReader() {
 		} catch (TRoboClawException* e) {
 			ROS_ERROR("[FarrynSkidSteerDrive::roboClawStatusReader] Exception: %s", e->what());
 		}
-	}
-}
-
-void FarrynSkidSteerDrive::queueThread() {
-	static const double timeout = 0.01;
-
-	while (alive && rosNode->ok()) {
-		queue.callAvailable(ros::WallDuration(timeout));
 	}
 }
 
@@ -890,7 +900,7 @@ void FarrynSkidSteerDrive::vwToWheelSpeed(double v, double w, double *left_mps, 
 }
 
 void FarrynSkidSteerDrive::writeByte(uint8_t byte) {
-	// ROS_DEBUG_COND(DEBUG, "[FarrynSkidSteerDrive::writeByte] byte: 0x%X", byte);
+	ROS_DEBUG_COND(DEBUG, "[FarrynSkidSteerDrive::writeByte] byte: 0x%X", byte);
 	ssize_t result = write(clawPort, &byte, 1);
 	if (result != 1) {
 		ROS_ERROR("[FarrynSkidSteerDrive::writeByte] Unable to write one byte, result: %d, errno: %d)", result,  errno);
@@ -906,7 +916,7 @@ void FarrynSkidSteerDrive::writeN(bool sendChecksum, uint8_t cnt, ...) {
 	uint16_t dataIndex = 0;
 
 	int origFlags = fcntl(clawPort, F_GETFL, 0);
-//	fcntl(clawPort, F_SETFL, origFlags & ~O_NONBLOCK);
+	//	fcntl(clawPort, F_SETFL, origFlags & ~O_NONBLOCK);
 
 	uint8_t checksum = 0;
 	for (uint8_t i = 0; i < cnt; i++) {
@@ -931,4 +941,4 @@ void FarrynSkidSteerDrive::writeN(bool sendChecksum, uint8_t cnt, ...) {
 	}
 }
 
-
+boost::mutex FarrynSkidSteerDrive::roboClawLock;

@@ -1,0 +1,42 @@
+float32  m1P
+float32  m1I
+float32  m1D
+uint32  m1Qpps
+int32   expectedM1Speed
+int32   currentM1Speed
+uint32  maxM1Distance
+uint8  m1BufferLength
+uint8  m1MovingForward
+float32  m1MotorCurrent
+uint32  encoderM1value
+uint8  encoderM1Status
+uint8  m1EncoderMode
+uint32  encoderM1Speed
+uint8  encoderM1Direction
+
+float32  m2P
+float32  m2I
+float32  m2D
+uint32  m2Qpps
+int32   expectedM2Speed
+int32   currentM2Speed
+uint32  maxM2Distance
+uint8  m2BufferLength
+uint8  m2MovingForward
+float32  m2MotorCurrent
+uint32  encoderM2value
+uint8  encoderM2Status
+uint8  m2EncoderMode
+uint32  encoderM2Speed
+uint8  encoderM2Direction
+
+float32  mainBatteryVoltage
+float32  logicBatteryVoltage
+float32  mainBatteryMin
+float32  mainBatteryMax
+float32  temperature
+uint8  stickyErrorStatus
+uint8  errorStatus
+string  errorString
+string  firmwareVersion
+

@@ -10,6 +10,7 @@
 #include <tf/transform_broadcaster.h>
 #include <tf/transform_listener.h>
 
+#include <LockFreeQueue.h>
 #include <boost/thread.hpp>
 #include <boost/thread/mutex.hpp>
 #include <boost/bind.hpp>
@@ -75,8 +76,10 @@ private:
 	double	updateRate_;
 	double	updatePeriod_;
 
-	boost::mutex roboClawLock; // Mutex for access to roboclaw via USB.
+	static boost::mutex roboClawLock; // Mutex for access to roboclaw via USB.
 	boost::thread roboClawStatusReaderThread; // Periodically read and publish RoboClaw status.
+	boost::thread roboClawMotorControllerThread; // Periodically dequeue and execute motor commands.
+	LockFreeQueue<geometry_msgs::Twist> twistQueue;
 
 	typedef struct {
 		unsigned long p1;
@@ -192,6 +195,8 @@ private:
 
 	void roboClawStatusReader();
 
+    void robotMotorController();
+    
 	void setM1PID(float p, float i, float d, uint32_t qpps);
 
 	void setM2PID(float p, float i, float d, uint32_t qpps);
