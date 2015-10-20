@@ -38,9 +38,34 @@ public:
 
 	float getLogicBatteryLevel();
 
+	float getMainBatteryLevel();
+
+	typedef struct {
+		int32_t		value;
+		uint8_t		status;
+	} EncodeResult;
+
 	int32_t getM1Encoder();
 
 	int32_t getM2Encoder();
+
+	typedef struct {
+		float m1Current;
+		float m2Current;
+	} TMotorCurrents;
+
+	TMotorCurrents getMotorCurrents();
+
+	typedef struct {
+		int32_t p;
+		int32_t i;
+		int32_t d;
+		int32_t q;
+	} TPIDQ;
+
+	TPIDQ getM1PIDQ();
+
+	TPIDQ getM2PIDQ();
 
 	string getVersion();
 
@@ -52,11 +77,6 @@ private:
 
 	boost::mutex roboClawLock; // Mutex for access to roboclaw via USB.
 	boost::thread roboClawStatusReaderThread; // Periodically read and publish RoboClaw status.
-
-	typedef struct {
-		int32_t		value;
-		uint8_t		status;
-	} EncodeResult;
 
 	typedef struct {
 		unsigned long p1;
