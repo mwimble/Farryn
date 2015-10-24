@@ -219,6 +219,10 @@ void FarrynSkidSteerDrive::configCallback(farryn_controller::FarrynConfig &confi
 }
 
 void FarrynSkidSteerDrive::drive(float velocity, float angle) {
+//[ INFO] [1445667044.319162594]: [FarrynSkidSteerDrive::cmdVelCallback] cmd_msg.linear.x: -0.500000, cmd_msg.angular.z: 0.000000
+//[DEBUG] [1445667044.319625560]: -----> [FarrynSkidSteerDrive::drive] velocity: -0.500000, angle: 0.000000
+//[ INFO] [1445667044.319889881]: [FarrynSkidSteerDrive::drive] ---- command: 43, drive velocity: -0.5, angle: 0, m1_speed: -4615, m1_max_distance: -768, m2_speed: -4615, m2_max_distance: -768
+
 	boost::mutex::scoped_lock scoped_lock(roboClawLock);
 	ROS_DEBUG_COND(DEBUG, "-----> [FarrynSkidSteerDrive::drive] velocity: %f, angle: %f", velocity, angle);
 	int32_t m1_speed;
@@ -226,6 +230,8 @@ void FarrynSkidSteerDrive::drive(float velocity, float angle) {
 	setVelocities(velocity, angle, &m1_speed, &m2_speed);
 	lastXVelocity = velocity - (AXLE_WIDTH / 2.0) * angle;
 	lastYVelocity = velocity + (AXLE_WIDTH / 2.0) * angle;
+	int32_t m1_abs_speed = m1_speed >= 0 ? m1_speed : -m1_speed;
+	int32_t m2_abs_speed = m2_speed >= 0 ? m2_speed : -m2_speed;
 	/*
 	if (left_velocity > M1_MAX_METERS_PER_SEC) left_velocity = M1_MAX_METERS_PER_SEC;
 	if (right_velocity > M2_MAX_METERS_PER_SEC) right_velocity = M2_MAX_METERS_PER_SEC;
@@ -234,8 +240,8 @@ void FarrynSkidSteerDrive::drive(float velocity, float angle) {
 	unsigned long m2_speed = right_velocity / M2_MAX_METERS_PER_SEC * M2_QPPS;
 	*/
 
-	int32_t m1_max_distance = M1_MAX_METERS_PER_SEC * m1_speed * MAX_SECONDS_TRAVEL; // Limit travel.
-	int32_t m2_max_distance = M2_MAX_METERS_PER_SEC * m2_speed * MAX_SECONDS_TRAVEL; // Limit travel.
+	int32_t m1_max_distance = M1_MAX_METERS_PER_SEC * m1_abs_speed * MAX_SECONDS_TRAVEL; // Limit travel.
+	int32_t m2_max_distance = M2_MAX_METERS_PER_SEC * m2_abs_speed * MAX_SECONDS_TRAVEL; // Limit travel.
 	ROS_INFO_STREAM("[FarrynSkidSteerDrive::drive] ---- command: " << MIXEDSPEEDDIST
 		 << ", drive velocity: " << velocity
 		 << ", angle: " << angle
