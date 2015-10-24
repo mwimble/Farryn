@@ -80,6 +80,14 @@ private:
 	boost::thread roboClawStatusReaderThread; // Periodically read and publish RoboClaw status.
 	boost::thread roboClawMotorControllerThread; // Periodically dequeue and execute motor commands.
 	LockFreeQueue<geometry_msgs::Twist> twistQueue;
+	
+	int32_t lastM1Position;
+	int32_t lastM2Position;
+	int32_t lastXPosition;
+	int32_t lastYPosition;
+	float lastXVelocity;
+	float lastYVelocity;
+	ros::Time lastTime;
 
 	typedef struct {
 		unsigned long p1;
@@ -201,8 +209,10 @@ private:
 
 	void setM2PID(float p, float i, float d, uint32_t qpps);
 
-	void setVelocities(double v, double w, uint32_t* left_qpps, uint32_t* right_qpps);
+	void setVelocities(double v, double w, int32_t* left_qpps, int32_t* right_qpps);
 
+    void updateOdometry();
+    
 	void vwToWheelSpeed(double v, double w, double *left_mps, double *right_mps);
 
 	void writeByte(uint8_t byte);
