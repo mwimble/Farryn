@@ -28,15 +28,24 @@
 
 // 7.5 inches in meters.
 #define axle_width_ 0.1905
-#define quad_pulse_per_meter_ 9230.0
+#define quad_pulse_per_meter_ 8883.098
+
+// Max no-load speed = 160 RPM
+#define meters_per_revolution 0.13508800645901
 
 FarrynSkidSteerDrive::FarrynSkidSteerDrive() :
+    expectedM1Speed(0),
+    expectedM2Speed(0),
     lastM1Position(0),
     lastM2Position(0),
     lastXPosition(0),
     lastYPosition(0),
     lastXVelocity(0.0),
-    lastYVelocity(0.0)
+    lastYVelocity(0.0),
+    m1MovingForward(true),
+    m2MovingForward(true),
+    maxM1Distance(0),
+    maxM2Distance(0)
     {
 	if (!ros::isInitialized()) {
 		ROS_FATAL_STREAM("[FarrynSkidSteerDrive::FarrynSkidSteerDrive] A ROS Node for FarrynSkidSteerDrive has not been initialized.");
@@ -56,7 +65,7 @@ FarrynSkidSteerDrive::FarrynSkidSteerDrive() :
 	MAX_SECONDS_TRAVEL = 0.5;
 	portAddress = 0x80;
 	MAX_COMMAND_RETRIES = 5;
-	DEBUG = true;
+	DEBUG = false;
 
 	M1_P = 226.3538;
 	M2_P = 267.1718;
@@ -129,6 +138,7 @@ FarrynSkidSteerDrive::FarrynSkidSteerDrive() :
 	
 	roboClawStatusReaderThread = boost::thread(boost::bind(&FarrynSkidSteerDrive::roboClawStatusReader, this));
 	roboClawMotorControllerThread = boost::thread(boost::bind(&FarrynSkidSteerDrive::robotMotorController, this));
+	roboClawOdometryThread = boost::thread(boost::bind(&FarrynSkidSteerDrive::updateOdometry, this));
 
 	setM1PID(M1_P, M1_I, 0, M1_QPPS);
 	setM2PID(M2_P, M2_I, 0, M2_QPPS);
@@ -240,8 +250,8 @@ void FarrynSkidSteerDrive::drive(float velocity, float angle) {
 	unsigned long m2_speed = right_velocity / M2_MAX_METERS_PER_SEC * M2_QPPS;
 	*/
 
-	int32_t m1_max_distance = M1_MAX_METERS_PER_SEC * m1_abs_speed * MAX_SECONDS_TRAVEL; // Limit travel.
-	int32_t m2_max_distance = M2_MAX_METERS_PER_SEC * m2_abs_speed * MAX_SECONDS_TRAVEL; // Limit travel.
+	int32_t m1_max_distance = m1_abs_speed * MAX_SECONDS_TRAVEL; // Limit travel.
+	int32_t m2_max_distance = m2_abs_speed * MAX_SECONDS_TRAVEL; // Limit travel.
 	ROS_INFO_STREAM("[FarrynSkidSteerDrive::drive] ---- command: " << MIXEDSPEEDDIST
 		 << ", drive velocity: " << velocity
 		 << ", angle: " << angle
@@ -249,6 +259,12 @@ void FarrynSkidSteerDrive::drive(float velocity, float angle) {
 		 << ", m1_max_distance: " << m1_max_distance
 		 << ", m2_speed: " << m2_speed
 		 << ", m2_max_distance: " << m2_max_distance);
+	
+	expectedM1Speed = m1_speed;
+	expectedM2Speed = m2_speed;
+	maxM1Distance = m1_max_distance;
+	maxM2Distance = m2_max_distance;
+
 	int retry;
 	for (retry = 0; retry < MAX_COMMAND_RETRIES; retry++) {
 		try {
@@ -423,6 +439,64 @@ int32_t FarrynSkidSteerDrive::getM1Encoder() {
 	throw new TRoboClawException("[FarrynSkidSteerDrive::getM1Encoder] RETRY COUNT EXCEEDED");
 }
 
+int32_t FarrynSkidSteerDrive::getSpeedResult(uint8_t command) {
+	ROS_DEBUG_COND(DEBUG, "[FarrynSkidSteerDrive::getSpeedResult command: 0x%X", command);
+	uint8_t checkSum = portAddress + command;
+
+	writeN(false, 2, portAddress, command);
+	int32_t result = 0;
+	uint8_t datum = readByteWithTimeout();
+	checkSum += datum;
+	result |= datum << 24;
+	datum = readByteWithTimeout();
+	checkSum += datum;
+	result |= datum << 16;
+	datum = readByteWithTimeout();
+	checkSum += datum;
+	result |= datum << 8;
+	datum = readByteWithTimeout();
+	checkSum += datum;
+	result |= datum;
+	
+	uint8_t direction = readByteWithTimeout();
+	checkSum += direction;
+	if (direction != 0) result = -result;
+
+	uint8_t responseChecksum = readByteWithTimeout();
+	if ((checkSum & 0x7F) != (responseChecksum & 0x7F)) {
+		ROS_ERROR("[FarrynSkidSteerDrive::getSpeedResult] Expected checkSum of: 0x%X, but got: 0x%X", int(checkSum), int(responseChecksum));
+		throw new TRoboClawException("[FarrynSkidSteerDrive::getSpeedResult] INVALID CHECKSUM");
+	}
+
+	return result;
+}
+
+int32_t FarrynSkidSteerDrive::getM1Speed() {
+	boost::mutex::scoped_lock lock(roboClawLock);
+	ROS_DEBUG_COND(DEBUG, "-----> [FarrynSkidSteerDrive::getM1Speed]");
+	int retry;
+
+	for (retry = 0; retry < MAX_COMMAND_RETRIES; retry++) {
+		try {
+			uint32_t result = getSpeedResult(GETM1SPEED);
+            ROS_DEBUG_COND(DEBUG, "<----- [FarrynSkidSteerDrive::getM1Speed] return");
+            if (result < 0) {
+                m1MovingForward = false;
+            } else {
+                m1MovingForward = true;
+            }
+
+			return result;
+		} catch (TRoboClawException* e) {
+			ROS_ERROR("[FarrynSkidSteerDrive::getM1Speed] Exception: %s, retry number: %d", e->what(), retry);
+		}
+	}
+
+	ROS_ERROR("[FarrynSkidSteerDrive::getM1Speed] RETRY COUNT EXCEEDED");
+    ROS_DEBUG_COND(DEBUG, "<----- [FarrynSkidSteerDrive::getM1Speed] ERROR");
+	throw new TRoboClawException("[FarrynSkidSteerDrive::getM1Speed] RETRY COUNT EXCEEDED");
+}
+
 int32_t FarrynSkidSteerDrive::getM2Encoder() {
 	boost::mutex::scoped_lock lock(roboClawLock);
 	ROS_DEBUG_COND(DEBUG, "-----> [FarrynSkidSteerDrive::getM2Encoder]");
@@ -441,6 +515,32 @@ int32_t FarrynSkidSteerDrive::getM2Encoder() {
 	ROS_ERROR("[FarrynSkidSteerDrive::getM2Encoder] RETRY COUNT EXCEEDED");
     ROS_DEBUG_COND(DEBUG, "<----- [FarrynSkidSteerDrive::getM2Encoder] ERROR");
 	throw new TRoboClawException("[FarrynSkidSteerDrive::getM2Encoder] RETRY COUNT EXCEEDED");
+}
+
+int32_t FarrynSkidSteerDrive::getM2Speed() {
+	boost::mutex::scoped_lock lock(roboClawLock);
+	ROS_DEBUG_COND(DEBUG, "-----> [FarrynSkidSteerDrive::getM2Speed]");
+	int retry;
+
+	for (retry = 0; retry < MAX_COMMAND_RETRIES; retry++) {
+		try {
+			uint32_t result = getSpeedResult(GETM2SPEED);
+            ROS_DEBUG_COND(DEBUG, "<----- [FarrynSkidSteerDrive::getM2Speed] return");
+            if (result < 0) {
+                m2MovingForward = false;
+            } else {
+                m2MovingForward = true;
+            }
+
+			return result;
+		} catch (TRoboClawException* e) {
+			ROS_ERROR("[FarrynSkidSteerDrive::getM2Speed] Exception: %s, retry number: %d", e->what(), retry);
+		}
+	}
+
+	ROS_ERROR("[FarrynSkidSteerDrive::getM2Speed] RETRY COUNT EXCEEDED");
+    ROS_DEBUG_COND(DEBUG, "<----- [FarrynSkidSteerDrive::getM2Speed] ERROR");
+	throw new TRoboClawException("[FarrynSkidSteerDrive::getM2Speed] RETRY COUNT EXCEEDED");
 }
 
 float FarrynSkidSteerDrive::getMainBatteryLevel() {
@@ -745,6 +845,15 @@ void FarrynSkidSteerDrive::roboClawStatusReader() {
 			roboClawStatus.encoderM2Status = encoder.status;
 			lastM2Position = encoder.value;
 			
+			roboClawStatus.expectedM1Speed = expectedM1Speed;
+			roboClawStatus.expectedM2Speed = expectedM2Speed;
+			roboClawStatus.currentM1Speed = getM1Speed();
+			roboClawStatus.currentM2Speed = getM2Speed();
+			roboClawStatus.maxM1Distance = maxM1Distance;
+			roboClawStatus.maxM1Distance = maxM2Distance;
+			roboClawStatus.m1MovingForward = m1MovingForward;
+			roboClawStatus.m2MovingForward = m2MovingForward;
+			
 			lastTime = ros::Time::now();
 
 			// stringstream ss;
@@ -900,6 +1009,10 @@ void FarrynSkidSteerDrive::stop() {
 				1 /* Cancel any previous command */
 				);
             ROS_INFO_STREAM("<----- [FarrynSkidSteerDrive::stop] return");
+            expectedM1Speed = 0;
+            expectedM2Speed = 0;
+            maxM1Distance = 0;
+            maxM2Distance = 0;
 			return;
 		} catch (TRoboClawException* e) {
 			ROS_ERROR("[FarrynSkidSteerDrive::stop] Exception: %s, retry number: %d", e->what(), retry);
@@ -912,28 +1025,122 @@ void FarrynSkidSteerDrive::stop() {
 }
 
 void FarrynSkidSteerDrive::updateOdometry() {
-// 	ROS_INFO("FarrynSkidSteerDrive::updateOdometry start");
-// 	ros::Publisher statusPublisher = rosNode->advertise<farryn_controller::RoboClawStatus>("odom", 10);
-// 	tf::TransformBroadcaster odomBroadcaster;
-// 	
-// 	double x = 0.0;
-// 	double y = 0.0;
-// 	double th = 0.0;
-// 	ros::Time currentTime = ros::Time::now();
-// 	
-// 	ros::Rate rate(1/*#####*/);
-// 	uint32_t counter = 0;
-// 	roboClawStatus.firmwareVersion = getVersion();
-// 	while (rosNode->ok()) {
-// 		try {
-// 		    ros::spinOnce();
-// 		    currentTime = ros::Time::now();
-// 		    double dt = (currentTime - lastTime).toSec();
-// 		    //double deltaX = (
-// 		} catch (TRoboClawException* e) {
-// 			ROS_ERROR("[FarrynSkidSteerDrive::roboClawStatusReader] Exception: %s", e->what());
-// 		}
-// 	}
+	ROS_INFO("FarrynSkidSteerDrive::updateOdometry start");
+	ros::Publisher odometryPublisher = rosNode->advertise<nav_msgs::Odometry>("odom", 50);
+	tf::TransformBroadcaster odomBroadcaster;
+	
+    ros::Time currentTime;
+	ros::Time lastTime = ros::Time::now();	
+	int32_t lastM1Encoder = getM1Encoder();
+	int32_t lastM2Encoder = getM2Encoder();
+	nav_msgs::Odometry odom;
+	double poseEncoderX = 0.0;
+	double poseEncoderY = 0.0;
+	double poseEncoderTheta = 0.0;
+	ros::Rate rate(1/*#####*/);
+	int retry;
+	
+	while (rosNode->ok()) {
+		try {
+		    ros::spinOnce();
+		    currentTime = ros::Time::now();
+		    double dt = (currentTime - lastTime).toSec();
+
+		    int32_t m1Encoder = getM1Encoder();
+		    int32_t m2Encoder = getM2Encoder();
+		    double m1DeltaDistance = (m1Encoder - lastM1Encoder) / quad_pulse_per_meter_;
+		    double m2DeltaDistance = (m2Encoder - lastM2Encoder) / quad_pulse_per_meter_;
+		    double theta = (m1DeltaDistance - m2DeltaDistance) / axle_width_;
+		    lastM1Encoder = m1Encoder;
+		    lastM2Encoder = m2Encoder;
+		    
+		    double dx = (m1DeltaDistance + m2DeltaDistance) / 2.0 * cos(poseEncoderTheta + (m1DeltaDistance - m2DeltaDistance) / (2.0 * axle_width_));
+		    double dy = (m1DeltaDistance + m2DeltaDistance) / 2.0 * sin(poseEncoderTheta + (m1DeltaDistance - m2DeltaDistance) / (2.0 * axle_width_));
+		    double dtheta = (m1DeltaDistance - m2DeltaDistance) / axle_width_;
+		    poseEncoderX += dx;
+		    poseEncoderY += dy;
+		    poseEncoderTheta += dtheta;
+		    
+		    double w = dtheta / dt;
+		    double v = sqrt((dx * dx) + (dy * dy)) / dt;
+		    
+		    tf::Quaternion qt;
+		    tf::Vector3 vt;
+		    qt.setRPY(0, 0, poseEncoderTheta);
+		    vt = tf::Vector3(poseEncoderX, poseEncoderY, 0);
+        	ROS_DEBUG_COND(1/*#####DEBUG*****/, 
+        	               "-----> [FarrynSkidSteerDrive::updateOdometry] "
+        	                  "dt: %f"
+        	                  ", m1Encoder: %d"
+        	                  ", m1DeltaDistance: %f"
+        	                  ", m2Encoder: %d"
+        	                  ", m2DeltaDistance: %f"
+        	                  ", theta: %f",
+        	               dt,
+        	               m1Encoder,
+        	               m1DeltaDistance,
+        	               m2Encoder,
+        	               m2DeltaDistance,
+        	               theta);
+        	ROS_DEBUG_COND(1/*#####DEBUG*****/, 
+        	               "-----> [FarrynSkidSteerDrive::updateOdometry] "
+        	                  "dx: %f"
+        	                  ", dy: %f"
+        	                  ", dtheta: %f"
+        	                  ", poseEncoderX: %f"
+        	                  ", poseEncoderY: %f"
+        	                  ", poseEncoderTheta: %f"
+        	                  ", w: %f"
+        	                  ", v: %f",
+        	               dx,
+        	               dy,
+        	               dtheta,
+        	               poseEncoderX,
+        	               poseEncoderY,
+        	               poseEncoderTheta,
+        	               w,
+        	               v);
+		    
+		    odom.pose.pose.position.x = vt.x();
+		    odom.pose.pose.position.y = vt.y();
+		    odom.pose.pose.position.z = vt.z();
+		    odom.pose.pose.orientation.x = qt.x();
+		    odom.pose.pose.orientation.y = qt.y();
+		    odom.pose.pose.orientation.z = qt.z();
+		    odom.pose.pose.orientation.w = qt.w();
+		    odom.pose.covariance[0] = 0.00001;
+		    odom.pose.covariance[7] = 0.00001;
+		    odom.pose.covariance[14] = 1000000000000.0;
+		    odom.pose.covariance[21] = 1000000000000.0;
+		    odom.pose.covariance[28] = 1000000000000.0;
+		    odom.pose.covariance[35] = 0.00001;
+		    odom.header.stamp = currentTime;
+		    odom.header.frame_id = "odom";
+		    odom.child_frame_id = "base_link";
+		    
+		    odom.twist.twist.angular.z = w;
+		    odom.twist.twist.linear.x = dx / dt;
+		    odom.twist.twist.linear.y = dy / dt;
+
+            odometryPublisher.publish(odom);
+            
+            geometry_msgs::Quaternion odom_quat = tf::createQuaternionMsgFromYaw(poseEncoderTheta);
+            geometry_msgs::TransformStamped odomTrans;
+            odomTrans.header.stamp = currentTime;
+            odomTrans.header.frame_id = "odom";
+            odomTrans.child_frame_id = "base_link";
+            odomTrans.transform.translation.x = poseEncoderX;
+            odomTrans.transform.translation.y = poseEncoderY;
+            odomTrans.transform.translation.z = 0.0;
+            odomTrans.transform.rotation = odom_quat;
+            odomBroadcaster.sendTransform(odomTrans);
+
+		    lastTime = currentTime;
+		    rate.sleep();
+		} catch (TRoboClawException* e) {
+			ROS_ERROR("[FarrynSkidSteerDrive::roboClawStatusReader] Exception: %s", e->what());
+		}
+	}
 }
 
 // Convert linear / angular velocity to left / right motor speeds in meters /

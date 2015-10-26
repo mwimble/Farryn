@@ -65,8 +65,12 @@ public:
 	} TPIDQ;
 
 	TPIDQ getM1PIDQ();
+	
+	int32_t getM1Speed();
 
 	TPIDQ getM2PIDQ();
+
+	int32_t getM2Speed();
 
 	string getVersion();
 
@@ -79,6 +83,7 @@ private:
 	static boost::mutex roboClawLock; // Mutex for access to roboclaw via USB.
 	boost::thread roboClawStatusReaderThread; // Periodically read and publish RoboClaw status.
 	boost::thread roboClawMotorControllerThread; // Periodically dequeue and execute motor commands.
+	boost::thread roboClawOdometryThread; // Publish odometry.
 	LockFreeQueue<geometry_msgs::Twist> twistQueue;
 	
 	int32_t lastM1Position;
@@ -165,6 +170,13 @@ private:
 	unsigned long M1_QPPS;
 	unsigned long M2_QPPS;
 	float AXLE_WIDTH;
+	
+	int32_t expectedM1Speed;
+	int32_t expectedM2Speed;
+	uint32_t maxM1Distance;
+	uint32_t maxM2Distance;
+	bool m1MovingForward;
+	bool m2MovingForward;
 
 	float MAX_SECONDS_TRAVEL;
 
@@ -192,6 +204,8 @@ private:
 	EncodeResult getEncoderCommandResult(uint8_t command);
 
 	uint32_t getLongCont(uint8_t& checksum);
+	
+	int32_t getSpeedResult(uint8_t command);
 
 	unsigned long getUlongCommandResult(uint8_t command);
 
