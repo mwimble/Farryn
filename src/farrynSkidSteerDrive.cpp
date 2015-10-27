@@ -1,3 +1,8 @@
+// roslaunch farryn_controller farryn.launch
+// rosrun teleop_twist_keyboard teleop_twist_keyboard.py
+// rostopic echo /RoboClawStatus
+// rostopic echo /cmd_vel
+
 // On exception, clear queue by waiting 10ms.
 // Capture speed, update last speed.
 
@@ -32,6 +37,7 @@
 
 // Max no-load speed = 160 RPM
 #define meters_per_revolution 0.13508800645901
+#define pulses_per_inch 225.6306892
 
 FarrynSkidSteerDrive::FarrynSkidSteerDrive() :
     expectedM1Speed(0),
@@ -1069,7 +1075,7 @@ void FarrynSkidSteerDrive::updateOdometry() {
 		    qt.setRPY(0, 0, poseEncoderTheta);
 		    vt = tf::Vector3(poseEncoderX, poseEncoderY, 0);
         	ROS_DEBUG_COND(1/*#####DEBUG*****/, 
-        	               "-----> [FarrynSkidSteerDrive::updateOdometry] "
+        	               "    [FarrynSkidSteerDrive::updateOdometry] "
         	                  "dt: %f"
         	                  ", m1Encoder: %d"
         	                  ", m1DeltaDistance: %f"
@@ -1083,7 +1089,7 @@ void FarrynSkidSteerDrive::updateOdometry() {
         	               m2DeltaDistance,
         	               theta);
         	ROS_DEBUG_COND(1/*#####DEBUG*****/, 
-        	               "-----> [FarrynSkidSteerDrive::updateOdometry] "
+        	               "    [FarrynSkidSteerDrive::updateOdometry] "
         	                  "dx: %f"
         	                  ", dy: %f"
         	                  ", dtheta: %f"
@@ -1196,6 +1202,8 @@ void FarrynSkidSteerDrive::writeN(bool sendChecksum, uint8_t cnt, ...) {
 
 	int origFlags = fcntl(clawPort, F_GETFL, 0);
 	//	fcntl(clawPort, F_SETFL, origFlags & ~O_NONBLOCK);
+
+    usleep(1000);
 
 	uint8_t checksum = 0;
 	for (uint8_t i = 0; i < cnt; i++) {
