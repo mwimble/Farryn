@@ -10,6 +10,7 @@
 #include <iostream>
 #include <nav_msgs/Odometry.h>
 #include <poll.h>
+#include <pthread.h>
 #include <sstream>
 #include <stdarg.h>
 #include <stdio.h>
@@ -39,6 +40,12 @@
 #define meters_per_revolution 0.13508800645901
 #define pulses_per_inch 225.6306892
 
+boost::mutex roboClawLock;
+
+uint32_t gettid() {
+    return static_cast<int32_t>(pthread_self());
+}
+
 FarrynSkidSteerDrive::FarrynSkidSteerDrive() :
     expectedM1Speed(0),
     expectedM2Speed(0),
@@ -53,6 +60,7 @@ FarrynSkidSteerDrive::FarrynSkidSteerDrive() :
     maxM1Distance(0),
     maxM2Distance(0)
     {
+    ROS_INFO("[FarrynSkidSteerDrive::FarrynSkidSteerDrive %X] constructor", gettid());
 	if (!ros::isInitialized()) {
 		ROS_FATAL_STREAM("[FarrynSkidSteerDrive::FarrynSkidSteerDrive] A ROS Node for FarrynSkidSteerDrive has not been initialized.");
 		throw new TRoboClawException("A ROS Node for FarrynSkidSteerDrive has not been initialized.");
@@ -71,7 +79,7 @@ FarrynSkidSteerDrive::FarrynSkidSteerDrive() :
 	MAX_SECONDS_TRAVEL = 0.5;
 	portAddress = 0x80;
 	MAX_COMMAND_RETRIES = 5;
-	DEBUG = false;
+	DEBUG = true;
 
 	M1_P = 226.3538;
 	M2_P = 267.1718;
@@ -88,66 +96,18 @@ FarrynSkidSteerDrive::FarrynSkidSteerDrive() :
 	rosNode->param<std::string>("cmd_vel_topic", cmdVelTopic, "/cmd_vel");
 	rosNode->param<std::string>("motor_usb_port", motorUSBPort, "/dev/ttyACM0");
 
-	clawPort = open(motorUSBPort.c_str(), O_RDWR | O_NOCTTY);
-	if (clawPort == -1) {
-		ROS_ERROR("[FarrynSkidSteerDrive::FarrynSkidSteerDrive] Unable to open USB port, errno: (%d) %s", errno, strerror(errno));
-		throw new TRoboClawException("[FarrynSkidSteerDrive::FarrynSkidSteerDrive] Unable to open USB port");
-	}
-
-	// if (ioctl(clawPort, USBDEVFS_RESET, 0) == -1) {
-	// 	ROS_ERROR("[FarrynSkidSteerDrive::FarrynSkidSteerDrive] Unable to reset USB port, error (%d) %s", errno, strerror(errno));
-	// 	throw new TRoboClawException("[FarrynSkidSteerDrive::FarrynSkidSteerDrive] Unable to reset USB port");
- //  	}
-
-  	lock.l_type = F_WRLCK;
-	lock.l_whence = SEEK_SET;
-	lock.l_start = 0;
-	lock.l_len = 0;
-	lock.l_pid = getpid();
-	if (fcntl(clawPort, F_SETLK, &lock) != 0) {
-		ROS_ERROR("[FarrynSkidSteerDrive::FarrynSkidSteerDrive] Device is already locked");
-		throw new TRoboClawException("[FarrynSkidSteerDrive::FarrynSkidSteerDrive] Device is already locked");
-	}
-
-    // Fetch the current port settings.
-	struct termios portOptions;
-	tcgetattr(clawPort, &portOptions);
-	memset(&portOptions.c_cc, 0, sizeof(portOptions.c_cc));
-
-    // Flush the port's buffers (in and out) before we start using it.
-    tcflush(clawPort, TCIOFLUSH);
-
-    // Set the input and output baud rates.
-    //cfsetispeed(&portOptions, B115200);
-    //cfsetospeed(&portOptions, B115200);
-
-    // c_cflag contains a few important things- CLOCAL and CREAD, to prevent
-    //   this program from "owning" the port and to enable receipt of data.
-    //   Also, it holds the settings for number of data bits, parity, stop bits,
-    //   and hardware flow control. 
-    portOptions.c_cflag = CS8 | CLOCAL | CREAD;
-    portOptions.c_iflag = IGNPAR;
-    portOptions.c_oflag = 0;
-    portOptions.c_lflag = 0;
-
-    // Now that we've populated our options structure, let's push it back to the system.
-    if (tcsetattr(clawPort, TCSANOW, &portOptions) < 0) {
-		ROS_ERROR("[FarrynSkidSteerDrive::FarrynSkidSteerDrive] Unable to set terminal options (tcsetattr)");
-		throw new TRoboClawException("[FarrynSkidSteerDrive::FarrynSkidSteerDrive] Unable to set terminal options (tcsetattr)");
-    }
-
+    openUsb();
+    
     // Flush the buffer one more time.
     tcflush(clawPort, TCIOFLUSH);
     flush();
     usleep(15000);
 	stop();
 	
-	roboClawStatusReaderThread = boost::thread(boost::bind(&FarrynSkidSteerDrive::roboClawStatusReader, this));
-	roboClawMotorControllerThread = boost::thread(boost::bind(&FarrynSkidSteerDrive::robotMotorController, this));
-	roboClawOdometryThread = boost::thread(boost::bind(&FarrynSkidSteerDrive::updateOdometry, this));
-
 	setM1PID(M1_P, M1_I, 0, M1_QPPS);
 	setM2PID(M2_P, M2_I, 0, M2_QPPS);
+	ROS_INFO("[FarrynSkidSteerDrive::FarrynSkidSteerDrive] Starting");
+	ROS_INFO("[FarrynSkidSteerDrive::FarrynSkidSteerDrive] getLogicBatteryLevel %f", getLogicBatteryLevel());
 
 	ros::SubscribeOptions so = 
 		ros::SubscribeOptions::create<geometry_msgs::Twist>(
@@ -157,11 +117,14 @@ FarrynSkidSteerDrive::FarrynSkidSteerDrive() :
 				ros::VoidPtr(),
 				&queue
 			);
-	cmdVelSubscriber = rosNode->subscribe(so);
-	callbackQueueThread = boost::thread(boost::bind(&FarrynSkidSteerDrive::queueThread, this));
 
-	ROS_INFO("[FarrynSkidSteerDrive::FarrynSkidSteerDrive] Starting");
-	ROS_INFO("[FarrynSkidSteerDrive::FarrynSkidSteerDrive] getLogicBatteryLevel %f", getLogicBatteryLevel());
+	callbackQueueThread = boost::thread(boost::bind(&FarrynSkidSteerDrive::queueThread, this));
+	roboClawStatusReaderThread = boost::thread(boost::bind(&FarrynSkidSteerDrive::roboClawStatusReader, this));
+	roboClawMotorControllerThread = boost::thread(boost::bind(&FarrynSkidSteerDrive::robotMotorController, this));
+	roboClawOdometryThread = boost::thread(boost::bind(&FarrynSkidSteerDrive::updateOdometry, this));
+
+	cmdVelSubscriber = rosNode->subscribe(so);
+
 }
 
 FarrynSkidSteerDrive::~FarrynSkidSteerDrive() {
@@ -175,7 +138,7 @@ FarrynSkidSteerDrive::~FarrynSkidSteerDrive() {
 }
 
 void FarrynSkidSteerDrive::cmdVelCallback(const geometry_msgs::Twist::ConstPtr& cmd_msg) {
-	ROS_INFO("[FarrynSkidSteerDrive::cmdVelCallback] cmd_msg.linear.x: %f, cmd_msg.angular.z: %f", cmd_msg->linear.x, cmd_msg->angular.z);
+	ROS_INFO("[FarrynSkidSteerDrive::cmdVelCallback %X] cmd_msg.linear.x: %f, cmd_msg.angular.z: %f", gettid(), cmd_msg->linear.x, cmd_msg->angular.z);
 	geometry_msgs::Twist copy;
 	copy.linear.x = cmd_msg->linear.x;
 	copy.angular.z = cmd_msg->angular.z;
@@ -186,7 +149,8 @@ void FarrynSkidSteerDrive::cmdVelCallback(const geometry_msgs::Twist::ConstPtr& 
 }
 
 void FarrynSkidSteerDrive::configCallback(farryn_controller::FarrynConfig &config, uint32_t level) {
-	ROS_INFO("[FarrynSkidSteerDrive::configCallback]\n\tlevel: %d\n\tcmd_vel_topic: %s\n\tKB_velocity:  %f\n\tmotorUSBPort: %s\n\t*updatePeriod: %f", 
+	ROS_INFO("[FarrynSkidSteerDrive::configCallback %X]\n\tlevel: %d\n\tcmd_vel_topic: %s\n\tKB_velocity:  %f\n\tmotorUSBPort: %s\n\t*updatePeriod: %f", 
+			 gettid(),
 			 level,
 			 config.cmd_vel_topic.c_str(),
 			 config.KP_velocity,
@@ -240,7 +204,7 @@ void FarrynSkidSteerDrive::drive(float velocity, float angle) {
 //[ INFO] [1445667044.319889881]: [FarrynSkidSteerDrive::drive] ---- command: 43, drive velocity: -0.5, angle: 0, m1_speed: -4615, m1_max_distance: -768, m2_speed: -4615, m2_max_distance: -768
 
 	boost::mutex::scoped_lock scoped_lock(roboClawLock);
-	ROS_DEBUG_COND(DEBUG, "-----> [FarrynSkidSteerDrive::drive] velocity: %f, angle: %f", velocity, angle);
+	ROS_INFO_COND(DEBUG, "-----> [FarrynSkidSteerDrive::drive %X] velocity: %f, angle: %f", gettid(), velocity, angle);
 	int32_t m1_speed;
 	int32_t m2_speed;
 	setVelocities(velocity, angle, &m1_speed, &m2_speed);
@@ -258,7 +222,7 @@ void FarrynSkidSteerDrive::drive(float velocity, float angle) {
 
 	int32_t m1_max_distance = m1_abs_speed * MAX_SECONDS_TRAVEL; // Limit travel.
 	int32_t m2_max_distance = m2_abs_speed * MAX_SECONDS_TRAVEL; // Limit travel.
-	ROS_INFO_STREAM("[FarrynSkidSteerDrive::drive] ---- command: " << MIXEDSPEEDDIST
+	ROS_INFO_STREAM("[FarrynSkidSteerDrive::drive " << hex << gettid() << dec << "] ---- command: " << MIXEDSPEEDDIST
 		 << ", drive velocity: " << velocity
 		 << ", angle: " << angle
 		 << ", m1_speed: " << m1_speed
@@ -281,28 +245,30 @@ void FarrynSkidSteerDrive::drive(float velocity, float angle) {
 				   SetDWORDval(m2_max_distance),
 				   1 /* Cancel any previous command */
 				   );
-            ROS_DEBUG_COND(DEBUG, "<----- [FarrynSkidSteerDrive::drive] return");
+            ROS_INFO_COND(DEBUG, "<----- [FarrynSkidSteerDrive::drive %X] return", gettid());
 			return;
 		} catch (TRoboClawException* e) {
-			ROS_ERROR("[FarrynSkidSteerDrive::drive] Exception: %s, retry number %d", e->what(), retry);
+			ROS_ERROR("[FarrynSkidSteerDrive::drive %X] Exception: %s, retry number %d", gettid(), e->what(), retry);
+		} catch (...) {
+		    ROS_ERROR("[FarrynSkidSteerDrive::drive %X] Uncaught exception !!!", gettid());
 		}
 	}
 
-	ROS_ERROR("[FarrynSkidSteerDrive::drive] RETRY COUNT EXCEEDED");
-    ROS_DEBUG_COND(DEBUG, "<----- [FarrynSkidSteerDrive::drive] ERROR");
+	ROS_ERROR("<----- [FarrynSkidSteerDrive::drive %X] RETRY COUNT EXCEEDED", gettid());
 	throw new TRoboClawException("[FarrynSkidSteerDrive::drive] RETRY COUNT EXCEEDED");
 }
 
 void FarrynSkidSteerDrive::flush() {
 	int retval = tcflush(clawPort, TCIOFLUSH);
+	ROS_INFO_COND(DEBUG, "[FarrynSkidSteerDrive::flush %X}", gettid());
 	if (retval != 0) {
-		ROS_ERROR("[FarrynSkidSteerDrive::flush] Unable to flush device");
+		ROS_ERROR("[FarrynSkidSteerDrive::flush %X] Unable to flush device", gettid());
 		throw new TRoboClawException("[FarrynSkidSteerDrive::flush] Unable to flush device");
 	}
 }
 
 unsigned short FarrynSkidSteerDrive::get2ByteCommandResult(uint8_t command) {
-	ROS_DEBUG_COND(DEBUG, "[FarrynSkidSteerDrive::get2ByteCommandResult] command: 0x%X", command);
+	ROS_INFO_COND(DEBUG, "[FarrynSkidSteerDrive::get2ByteCommandResult %X] command: 0x%X", gettid(), command);
 	uint8_t checkSum = portAddress + command;
 
 	writeN(false, 2, portAddress, command);
@@ -316,7 +282,10 @@ unsigned short FarrynSkidSteerDrive::get2ByteCommandResult(uint8_t command) {
 
 	uint8_t responseChecksum = readByteWithTimeout();
 	if ((checkSum & 0x7F) != (responseChecksum & 0x7F)) {
-		if (DEBUG) ROS_ERROR("[FarrynSkidSteerDrive::get2ByteCommandResult] Expected checkSum of: 0x%X, but got: 0x%X", int(checkSum), int(responseChecksum));
+		if (DEBUG) ROS_ERROR("[FarrynSkidSteerDrive::get2ByteCommandResult %X] Expected checkSum of: 0x%X, but got: 0x%X",
+		    gettid(),
+		    int(checkSum),
+		    int(responseChecksum));
 		throw new TRoboClawException("[FarrynSkidSteerDrive::get2ByteCommandResult] INVALID CHECKSUM");
 	}
 
@@ -324,7 +293,7 @@ unsigned short FarrynSkidSteerDrive::get2ByteCommandResult(uint8_t command) {
 }
 
 FarrynSkidSteerDrive::EncodeResult FarrynSkidSteerDrive::getEncoderCommandResult(uint8_t command) {
-	ROS_DEBUG_COND(DEBUG, "[FarrynSkidSteerDrive::getEncoderCommandResult] command: 0x%X", command);
+	ROS_INFO_COND(DEBUG, "[FarrynSkidSteerDrive::getEncoderCommandResult %X] command: 0x%X", gettid(), command);
 	uint8_t checkSum = portAddress + command;
 
 	writeN(false, 2, portAddress, command);
@@ -345,11 +314,18 @@ FarrynSkidSteerDrive::EncodeResult FarrynSkidSteerDrive::getEncoderCommandResult
 	checkSum += datum;
 	result.status = datum;
 
-	ROS_DEBUG_COND(DEBUG, "[FarrynSkidSteerDrive::::EncodeResult] command: %d, value: %d, status: 0x%x", command, result.value, result.status);
+	ROS_INFO_COND(DEBUG, "[FarrynSkidSteerDrive::::EncodeResult %X] command: %d, value: %d, status: 0x%x",
+	    gettid(),
+	    command, 
+	    result.value, 
+	    result.status);
 
 	uint8_t responseChecksum = readByteWithTimeout();
 	if ((checkSum & 0x7F) != (responseChecksum & 0x7F)) {
-		ROS_ERROR("[FarrynSkidSteerDrive::EncodeResult] Expected checkSum of: 0x%X, but got: 0x%X", int(checkSum), int(responseChecksum));
+		ROS_ERROR("[FarrynSkidSteerDrive::EncodeResult %X] Expected checkSum of: 0x%X, but got: 0x%X", 
+		    gettid(), 
+		    int(checkSum), 
+		    int(responseChecksum));
 		throw new TRoboClawException("[FarrynSkidSteerDrive::::EncodeResult] INVALID CHECKSUM");
 	}
 
@@ -358,7 +334,7 @@ FarrynSkidSteerDrive::EncodeResult FarrynSkidSteerDrive::getEncoderCommandResult
 
 uint16_t FarrynSkidSteerDrive::getErrorStatus() {
 	boost::mutex::scoped_lock lock(roboClawLock);
-	ROS_DEBUG_COND(DEBUG, "-----> [FarrynSkidSteerDrive::getErrorStatus]");
+	ROS_INFO_COND(DEBUG, "-----> [FarrynSkidSteerDrive::getErrorStatus %X]", gettid());
 	int retry;
 
 	for (retry = 0; retry < MAX_COMMAND_RETRIES; retry++) {
@@ -376,39 +352,42 @@ uint16_t FarrynSkidSteerDrive::getErrorStatus() {
 			// 	throw new TRoboClawException("[FarrynSkidSteerDrive::getErrorStatus] INVALID CHECKSUM");
 			// }
 
-        	ROS_DEBUG_COND(DEBUG, "<----- [FarrynSkidSteerDrive::getErrorStatus] return");
+        	ROS_INFO_COND(DEBUG, "<----- [FarrynSkidSteerDrive::getErrorStatus %X] return: 0x%X", gettid(), datum);
 			return datum;
 		} catch (TRoboClawException* e) {
-			ROS_ERROR("[FarrynSkidSteerDrive::getErrorStatus] Exception: %s, retry number: %d", e->what(), retry);
+			ROS_ERROR("[FarrynSkidSteerDrive::getErrorStatus %X] Exception: %s, retry number: %d", gettid(), e->what(), retry);
+		} catch (...) {
+		    ROS_ERROR("[FarrynSkidSteerDrive::getErrorStatus %X] Uncaught exception !!!", gettid());
 		}
 	}
 
-	ROS_ERROR("[FarrynSkidSteerDrive::getErrorStatus] RETRY COUNT EXCEEDED");
-    ROS_DEBUG_COND(DEBUG, "<----- [FarrynSkidSteerDrive::getErrorStatus] ERROR");
+	ROS_ERROR("<----- [FarrynSkidSteerDrive::getErrorStatus %X] RETRY COUNT EXCEEDED", gettid());
 	throw new TRoboClawException("[FarrynSkidSteerDrive::getErrorStatus] RETRY COUNT EXCEEDED");
 }
 
 float FarrynSkidSteerDrive::getLogicBatteryLevel() {
 	boost::mutex::scoped_lock lock(roboClawLock);
-	ROS_DEBUG_COND(DEBUG, "-----> [FarrynSkidSteerDrive::getLogicBatteryLevel]");
+	ROS_INFO_COND(DEBUG, "-----> [FarrynSkidSteerDrive::getLogicBatteryLevel %X]", gettid());
 	int retry;
 
 	for (retry = 0; retry < MAX_COMMAND_RETRIES; retry++) {
 		try {
-        	ROS_DEBUG_COND(DEBUG, "<----- [FarrynSkidSteerDrive::getLogicBatteryLevel] return");
-			return ((float) get2ByteCommandResult(GETLBATT)) / 10.0;
+			float result = ((float) get2ByteCommandResult(GETLBATT)) / 10.0;
+        	ROS_INFO_COND(DEBUG, "<----- [FarrynSkidSteerDrive::getLogicBatteryLevel %X] return %f", gettid(), result);
+        	return result;
 		} catch (TRoboClawException* e) {
-			ROS_ERROR("[FarrynSkidSteerDrive::getLogicBatteryLevel] Exception: %s, retry number: %d", e->what(), retry);
+			ROS_ERROR("[FarrynSkidSteerDrive::getLogicBatteryLevel %X] Exception: %s, retry number: %d", gettid(), e->what(), retry);
+		} catch (...) {
+		    ROS_ERROR("[FarrynSkidSteerDrive::getLogicBatteryLevel %X] Uncaught exception !!!", gettid());
 		}
 	}
 
-	ROS_ERROR("[FarrynSkidSteerDrive::getErrorStatus] RETRY COUNT EXCEEDED");
-    ROS_DEBUG_COND(DEBUG, "<----- [FarrynSkidSteerDrive::getLogicBatteryLevel] ERROR");
-	throw new TRoboClawException("[FarrynSkidSteerDrive::getErrorStatus] RETRY COUNT EXCEEDED");
+	ROS_ERROR("<----- [FarrynSkidSteerDrive::getLogicBatteryLevel %X] RETRY COUNT EXCEEDED", gettid());
+	throw new TRoboClawException("[FarrynSkidSteerDrive::getLogicBatteryLevel] RETRY COUNT EXCEEDED");
 }
 
 uint32_t FarrynSkidSteerDrive::getLongCont(uint8_t& checksum) {
-	ROS_DEBUG_COND(DEBUG, "[FarrynSkidSteerDrive::getLongCont] checksum: 0x%X", checksum);
+	ROS_INFO_COND(DEBUG, "[FarrynSkidSteerDrive::getLongCont %X] checksum: 0x%X", gettid(), checksum);
 	uint32_t result = 0;
 	uint8_t datum = readByteWithTimeout();
 	checksum += datum;
@@ -427,26 +406,27 @@ uint32_t FarrynSkidSteerDrive::getLongCont(uint8_t& checksum) {
 
 int32_t FarrynSkidSteerDrive::getM1Encoder() {
 	boost::mutex::scoped_lock lock(roboClawLock);
-	ROS_DEBUG_COND(DEBUG, "-----> [FarrynSkidSteerDrive::getM1Encoder]");
+	ROS_INFO_COND(DEBUG, "-----> [FarrynSkidSteerDrive::getM1Encoder %X]", gettid());
 	int retry;
 
 	for (retry = 0; retry < MAX_COMMAND_RETRIES; retry++) {
 		try {
 			EncodeResult result = getEncoderCommandResult(GETM1ENC);
-            ROS_DEBUG_COND(DEBUG, "<----- [FarrynSkidSteerDrive::getM1Encoder] return");
+            ROS_INFO_COND(DEBUG, "<----- [FarrynSkidSteerDrive::getM1Encoder %X] return: %d/0x%X", gettid(), result.value, result.status);
 			return result.value;
 		} catch (TRoboClawException* e) {
-			ROS_ERROR("[FarrynSkidSteerDrive::getM1Encoder] Exception: %s, retry number: %d", e->what(), retry);
+			ROS_ERROR("[FarrynSkidSteerDrive::getM1Encoder %X] Exception: %s, retry number: %d", gettid(), e->what(), retry);
+		} catch (...) {
+		    ROS_ERROR("[FarrynSkidSteerDrive::getM1Encoder %X] Uncaught exception !!!", gettid());
 		}
 	}
 
-	ROS_ERROR("[FarrynSkidSteerDrive::getM1Encoder] RETRY COUNT EXCEEDED");
-    ROS_DEBUG_COND(DEBUG, "<----- [FarrynSkidSteerDrive::getM1Encoder] ERROR");
+	ROS_ERROR("<----- [FarrynSkidSteerDrive::getM1Encoder %X] RETRY COUNT EXCEEDED", gettid());
 	throw new TRoboClawException("[FarrynSkidSteerDrive::getM1Encoder] RETRY COUNT EXCEEDED");
 }
 
 int32_t FarrynSkidSteerDrive::getSpeedResult(uint8_t command) {
-	ROS_DEBUG_COND(DEBUG, "[FarrynSkidSteerDrive::getSpeedResult command: 0x%X", command);
+	ROS_INFO_COND(DEBUG, "[FarrynSkidSteerDrive::getSpeedResult %X] command: 0x%X", gettid(), command);
 	uint8_t checkSum = portAddress + command;
 
 	writeN(false, 2, portAddress, command);
@@ -470,7 +450,7 @@ int32_t FarrynSkidSteerDrive::getSpeedResult(uint8_t command) {
 
 	uint8_t responseChecksum = readByteWithTimeout();
 	if ((checkSum & 0x7F) != (responseChecksum & 0x7F)) {
-		ROS_ERROR("[FarrynSkidSteerDrive::getSpeedResult] Expected checkSum of: 0x%X, but got: 0x%X", int(checkSum), int(responseChecksum));
+		ROS_ERROR("[FarrynSkidSteerDrive::getSpeedResult %X] Expected checkSum of: 0x%X, but got: 0x%X", gettid(), int(checkSum), int(responseChecksum));
 		throw new TRoboClawException("[FarrynSkidSteerDrive::getSpeedResult] INVALID CHECKSUM");
 	}
 
@@ -479,13 +459,13 @@ int32_t FarrynSkidSteerDrive::getSpeedResult(uint8_t command) {
 
 int32_t FarrynSkidSteerDrive::getM1Speed() {
 	boost::mutex::scoped_lock lock(roboClawLock);
-	ROS_DEBUG_COND(DEBUG, "-----> [FarrynSkidSteerDrive::getM1Speed]");
+	ROS_INFO_COND(DEBUG, "-----> [FarrynSkidSteerDrive::getM1Speed %X]", gettid());
 	int retry;
 
 	for (retry = 0; retry < MAX_COMMAND_RETRIES; retry++) {
 		try {
 			uint32_t result = getSpeedResult(GETM1SPEED);
-            ROS_DEBUG_COND(DEBUG, "<----- [FarrynSkidSteerDrive::getM1Speed] return");
+            ROS_INFO_COND(DEBUG, "<----- [FarrynSkidSteerDrive::getM1Speed %X] return: %d", gettid(), result);
             if (result < 0) {
                 m1MovingForward = false;
             } else {
@@ -494,44 +474,46 @@ int32_t FarrynSkidSteerDrive::getM1Speed() {
 
 			return result;
 		} catch (TRoboClawException* e) {
-			ROS_ERROR("[FarrynSkidSteerDrive::getM1Speed] Exception: %s, retry number: %d", e->what(), retry);
+			ROS_ERROR("[FarrynSkidSteerDrive::getM1Speed %X] Exception: %s, retry number: %d", gettid(), e->what(), retry);
+		} catch (...) {
+		    ROS_ERROR("[FarrynSkidSteerDrive::getM1Speed %X] Uncaught exception !!!", gettid());
 		}
 	}
 
-	ROS_ERROR("[FarrynSkidSteerDrive::getM1Speed] RETRY COUNT EXCEEDED");
-    ROS_DEBUG_COND(DEBUG, "<----- [FarrynSkidSteerDrive::getM1Speed] ERROR");
+	ROS_ERROR("<----- [FarrynSkidSteerDrive::getM1Speed %X] RETRY COUNT EXCEEDED", gettid());
 	throw new TRoboClawException("[FarrynSkidSteerDrive::getM1Speed] RETRY COUNT EXCEEDED");
 }
 
 int32_t FarrynSkidSteerDrive::getM2Encoder() {
 	boost::mutex::scoped_lock lock(roboClawLock);
-	ROS_DEBUG_COND(DEBUG, "-----> [FarrynSkidSteerDrive::getM2Encoder]");
+	ROS_INFO_COND(DEBUG, "-----> [FarrynSkidSteerDrive::getM2Encoder %X]", gettid());
 	int retry;
 
 	for (retry = 0; retry < MAX_COMMAND_RETRIES; retry++) {
 		try {
 			EncodeResult result = getEncoderCommandResult(GETM2ENC);
-            ROS_DEBUG_COND(DEBUG, "<----- [FarrynSkidSteerDrive::getM2Encoder] return");
+            ROS_INFO_COND(DEBUG, "<----- [FarrynSkidSteerDrive::getM2Encoder %X] return: %d/0x%X", gettid(), result.value, result.status);
 			return result.value;
 		} catch (TRoboClawException* e) {
-			ROS_ERROR("[FarrynSkidSteerDrive::getM2Encoder] Exception: %s, retry number: %d", e->what(), retry);
+			ROS_ERROR("[FarrynSkidSteerDrive::getM2Encoder %X] Exception: %s, retry number: %d", gettid(), e->what(), retry);
+		} catch (...) {
+		    ROS_ERROR("[FarrynSkidSteerDrive::getM2Encoder %X] Uncaught exception !!!", gettid());
 		}
 	}
 
-	ROS_ERROR("[FarrynSkidSteerDrive::getM2Encoder] RETRY COUNT EXCEEDED");
-    ROS_DEBUG_COND(DEBUG, "<----- [FarrynSkidSteerDrive::getM2Encoder] ERROR");
+	ROS_ERROR("<----- [FarrynSkidSteerDrive::getM2Encoder %X] RETRY COUNT EXCEEDED", gettid());
 	throw new TRoboClawException("[FarrynSkidSteerDrive::getM2Encoder] RETRY COUNT EXCEEDED");
 }
 
 int32_t FarrynSkidSteerDrive::getM2Speed() {
 	boost::mutex::scoped_lock lock(roboClawLock);
-	ROS_DEBUG_COND(DEBUG, "-----> [FarrynSkidSteerDrive::getM2Speed]");
+	ROS_INFO_COND(DEBUG, "-----> [FarrynSkidSteerDrive::getM2Speed %X]", gettid());
 	int retry;
 
 	for (retry = 0; retry < MAX_COMMAND_RETRIES; retry++) {
 		try {
 			uint32_t result = getSpeedResult(GETM2SPEED);
-            ROS_DEBUG_COND(DEBUG, "<----- [FarrynSkidSteerDrive::getM2Speed] return");
+            ROS_INFO_COND(DEBUG, "<----- [FarrynSkidSteerDrive::getM2Speed %X] return: %d", gettid(), result);
             if (result < 0) {
                 m2MovingForward = false;
             } else {
@@ -540,37 +522,40 @@ int32_t FarrynSkidSteerDrive::getM2Speed() {
 
 			return result;
 		} catch (TRoboClawException* e) {
-			ROS_ERROR("[FarrynSkidSteerDrive::getM2Speed] Exception: %s, retry number: %d", e->what(), retry);
+			ROS_ERROR("[FarrynSkidSteerDrive::getM2Speed %X] Exception: %s, retry number: %d", gettid(), e->what(), retry);
+		} catch (...) {
+		    ROS_ERROR("[FarrynSkidSteerDrive::getM2Speed %X] Uncaught exception !!!", gettid());
 		}
 	}
 
-	ROS_ERROR("[FarrynSkidSteerDrive::getM2Speed] RETRY COUNT EXCEEDED");
-    ROS_DEBUG_COND(DEBUG, "<----- [FarrynSkidSteerDrive::getM2Speed] ERROR");
+	ROS_ERROR("<----- [FarrynSkidSteerDrive::getM2Speed %X] RETRY COUNT EXCEEDED", gettid());
 	throw new TRoboClawException("[FarrynSkidSteerDrive::getM2Speed] RETRY COUNT EXCEEDED");
 }
 
 float FarrynSkidSteerDrive::getMainBatteryLevel() {
 	boost::mutex::scoped_lock lock(roboClawLock);
-	ROS_DEBUG_COND(DEBUG, "-----> [FarrynSkidSteerDrive::getMainBatteryLevel]");
+	ROS_INFO_COND(DEBUG, "-----> [FarrynSkidSteerDrive::getMainBatteryLevel %X]", gettid());
 	int retry;
 
 	for (retry = 0; retry < MAX_COMMAND_RETRIES; retry++) {
 		try {
-        	ROS_DEBUG_COND(DEBUG, "<----- [FarrynSkidSteerDrive::getMainBatteryLevel] return");
-			return ((float) get2ByteCommandResult(GETMBATT)) / 10.0;
+			float result = ((float) get2ByteCommandResult(GETMBATT)) / 10.0;
+        	ROS_INFO_COND(DEBUG, "<----- [FarrynSkidSteerDrive::getMainBatteryLevel %X] return: %f", gettid(), result);
+        	return result;
 		} catch (TRoboClawException* e) {
-			ROS_ERROR("[FarrynSkidSteerDrive::getMainBatteryLevel] Exception: %s, retry number: %d", e->what(), retry);
+			ROS_ERROR("[FarrynSkidSteerDrive::getMainBatteryLevel %X] Exception: %s, retry number: %d", gettid(), e->what(), retry);
+		} catch (...) {
+		    ROS_ERROR("[FarrynSkidSteerDrive::getMainBatteryLevel %X] Uncaught exception !!!", gettid());
 		}
 	}
 
-	ROS_ERROR("[FarrynSkidSteerDrive::getMainBatteryLevel] RETRY COUNT EXCEEDED");
-    ROS_DEBUG_COND(DEBUG, "<----- [FarrynSkidSteerDrive::getMainBatteryLevel] ERROR");
+	ROS_ERROR("<----- [FarrynSkidSteerDrive::getMainBatteryLevel %X] RETRY COUNT EXCEEDED", gettid());
 	throw new TRoboClawException("[FarrynSkidSteerDrive::getMainBatteryLevel] RETRY COUNT EXCEEDED");
 }
 
 FarrynSkidSteerDrive::TMotorCurrents FarrynSkidSteerDrive::getMotorCurrents() {
 	boost::mutex::scoped_lock lock(roboClawLock);
-	ROS_DEBUG_COND(DEBUG, "-----> [FarrynSkidSteerDrive::getMotorCurrents]");
+	ROS_INFO_COND(DEBUG, "-----> [FarrynSkidSteerDrive::getMotorCurrents %X]", gettid());
 	int retry;
 
 	for (retry = 0; retry < MAX_COMMAND_RETRIES; retry++) {
@@ -579,20 +564,21 @@ FarrynSkidSteerDrive::TMotorCurrents FarrynSkidSteerDrive::getMotorCurrents() {
 			unsigned long currentPair = getUlongCommandResult(GETCURRENTS);
 			result.m1Current = ((int16_t) (currentPair >> 16)) * 0.010;
 			result.m2Current = ((int16_t) (currentPair & 0xFFFF)) * 0.010;
-        	ROS_DEBUG_COND(DEBUG, "<----- [FarrynSkidSteerDrive::getMotorCurrents] return");
+        	ROS_INFO_COND(DEBUG, "<----- [FarrynSkidSteerDrive::getMotorCurrents %X] return: %f/%f", gettid(), result.m1Current, result.m2Current);
 			return result;
 		} catch (TRoboClawException* e) {
-			ROS_ERROR("[FarrynSkidSteerDrive::getMotorCurrents] Exception: %s, retry number: %d", e->what(), retry);
+			ROS_ERROR("[FarrynSkidSteerDrive::getMotorCurrents %X] Exception: %s, retry number: %d", gettid(), e->what(), retry);
+		} catch (...) {
+		    ROS_ERROR("[FarrynSkidSteerDrive::getMotorCurrents %X] Uncaught exception !!!", gettid());
 		}
 	}
 
-	ROS_ERROR("[FarrynSkidSteerDrive::getMotorCurrents] RETRY COUNT EXCEEDED");
-    ROS_DEBUG_COND(DEBUG, "<----- [FarrynSkidSteerDrive::getMotorCurrents] ERROR");
+	ROS_ERROR("<----- [FarrynSkidSteerDrive::getMotorCurrents %X] RETRY COUNT EXCEEDED", gettid());
 	throw new TRoboClawException("[FarrynSkidSteerDrive::getMotorCurrents] RETRY COUNT EXCEEDED");
 }
 
 unsigned long FarrynSkidSteerDrive::getUlongCommandResult(uint8_t command) {
-	ROS_DEBUG_COND(DEBUG, "[FarrynSkidSteerDrive::getUlongCommandResult command: 0x%X", command);
+	ROS_INFO_COND(DEBUG, "[FarrynSkidSteerDrive::getUlongCommandResult %X] command: 0x%X", gettid(), command);
 	uint8_t checkSum = portAddress + command;
 
 	writeN(false, 2, portAddress, command);
@@ -612,7 +598,7 @@ unsigned long FarrynSkidSteerDrive::getUlongCommandResult(uint8_t command) {
 
 	uint8_t responseChecksum = readByteWithTimeout();
 	if ((checkSum & 0x7F) != (responseChecksum & 0x7F)) {
-		ROS_ERROR("[FarrynSkidSteerDrive::getUlongCommandResult] Expected checkSum of: 0x%X, but got: 0x%X", int(checkSum), int(responseChecksum));
+		ROS_ERROR("[FarrynSkidSteerDrive::getUlongCommandResult %X] Expected checkSum of: 0x%X, but got: 0x%X", gettid(), int(checkSum), int(responseChecksum));
 		throw new TRoboClawException("[FarrynSkidSteerDrive::getUlongCommandResult] INVALID CHECKSUM");
 	}
 
@@ -620,7 +606,7 @@ unsigned long FarrynSkidSteerDrive::getUlongCommandResult(uint8_t command) {
 }
 
 FarrynSkidSteerDrive::ULongPair FarrynSkidSteerDrive::getULongPairCommandResult(uint8_t command) {
-	ROS_DEBUG_COND(DEBUG, "[FarrynSkidSteerDrive::getULongPairCommandResult] command: 0x%X", command);
+	ROS_INFO_COND(DEBUG, "[FarrynSkidSteerDrive::getULongPairCommandResult %X] command: 0x%X", gettid(), command);
 	uint8_t checksum = portAddress + command;
 
 	writeN(false, 2, portAddress, command);
@@ -629,7 +615,10 @@ FarrynSkidSteerDrive::ULongPair FarrynSkidSteerDrive::getULongPairCommandResult(
 
 	uint8_t responseChecksum = readByteWithTimeout();
 	if ((checksum & 0x7F) != (responseChecksum & 0x7F)) {
-		ROS_ERROR("[FarrynSkidSteerDrive::getULongPairCommandResult] Expected checkSum of: 0x%X, but got: 0x%X", int(checksum), int(responseChecksum));
+		ROS_ERROR("[FarrynSkidSteerDrive::getULongPairCommandResult %X] Expected checkSum of: 0x%X, but got: 0x%X",
+		          gettid(), 
+		          int(checksum), 
+		          int(responseChecksum));
 		throw new TRoboClawException("[FarrynSkidSteerDrive::getULongPairCommandResult] INVALID CHECKSUM");
 	}
 
@@ -642,7 +631,7 @@ FarrynSkidSteerDrive::ULongPair FarrynSkidSteerDrive::getULongPairCommandResult(
 FarrynSkidSteerDrive::TPIDQ FarrynSkidSteerDrive::getM1PIDQ() {
 	TPIDQ result;
 	boost::mutex::scoped_lock lock(roboClawLock);
-	ROS_DEBUG_COND(DEBUG, "-----> [FarrynSkidSteerDrive::getM1PIDQ]");
+	ROS_INFO_COND(DEBUG, "-----> [FarrynSkidSteerDrive::getM1PIDQ %X]", gettid());
 	int retry;
 
 	for (retry = 0; retry < MAX_COMMAND_RETRIES; retry++) {
@@ -656,26 +645,35 @@ FarrynSkidSteerDrive::TPIDQ FarrynSkidSteerDrive::getM1PIDQ() {
 			result.q = (int32_t) getLongCont(checksum);
 			uint8_t responseChecksum = readByteWithTimeout();
 			if ((checksum & 0x7F) != (responseChecksum & 0x7F)) {
-				ROS_ERROR("[FarrynSkidSteerDrive::getM1PIDQ] Expected checksum of: 0x%X, but got: 0x%X", int(checksum), int(responseChecksum));
+				ROS_ERROR("[FarrynSkidSteerDrive::getM1PIDQ %X] Expected checksum of: 0x%X, but got: 0x%X",
+				          gettid(), 
+				          int(checksum), 
+				          int(responseChecksum));
 				throw new TRoboClawException("[FarrynSkidSteerDrive::getM1PIDQ] INVALID CHECKSUM");
 			}
 
-        	ROS_DEBUG_COND(DEBUG, "<----- [FarrynSkidSteerDrive::getM1PIDQ] return");
+        	ROS_INFO_COND(DEBUG, "<----- [FarrynSkidSteerDrive::getM1PIDQ %X] return: %d, %d, %d, %d",
+        	              gettid(),
+        	              result.p,
+        	              result.i,
+        	              result.d,
+        	              result.q);
 			return result;
 		} catch (TRoboClawException* e) {
-			ROS_ERROR("[FarrynSkidSteerDrive::getM1PIDQ] Exception: %s, retry number: %d", e->what(), retry);
+			ROS_ERROR("[FarrynSkidSteerDrive::getM1PIDQ %X] Exception: %s, retry number: %d", gettid(), e->what(), retry);
+		} catch (...) {
+		    ROS_ERROR("[FarrynSkidSteerDrive::getM1PIDQ %X] Uncaught exception !!!", gettid());
 		}
 	}
 
-	ROS_ERROR("[FarrynSkidSteerDrive::getM1PIDQ] RETRY COUNT EXCEEDED");
-    ROS_DEBUG_COND(DEBUG, "<----- [FarrynSkidSteerDrive::getM1PIDQ] ERROR");
+	ROS_ERROR("<----- [FarrynSkidSteerDrive::getM1PIDQ %X] RETRY COUNT EXCEEDED", gettid());
 	throw new TRoboClawException("[FarrynSkidSteerDrive::getM1PIDQ] RETRY COUNT EXCEEDED");
 }
 
 FarrynSkidSteerDrive::TPIDQ FarrynSkidSteerDrive::getM2PIDQ() {
 	TPIDQ result;
 	boost::mutex::scoped_lock lock(roboClawLock);
-	ROS_DEBUG_COND(DEBUG, "-----> [FarrynSkidSteerDrive::getM2PIDQ]");
+	ROS_INFO_COND(DEBUG, "-----> [FarrynSkidSteerDrive::getM2PIDQ %X]", gettid());
 	int retry;
 
 	for (retry = 0; retry < MAX_COMMAND_RETRIES; retry++) {
@@ -689,25 +687,34 @@ FarrynSkidSteerDrive::TPIDQ FarrynSkidSteerDrive::getM2PIDQ() {
 			result.q = (int32_t) getLongCont(checksum);
 			uint8_t responseChecksum = readByteWithTimeout();
 			if ((checksum & 0x7F) != (responseChecksum & 0x7F)) {
-				ROS_ERROR("[FarrynSkidSteerDrive::getM2PIDQ] Expected checksum of: 0x%X, but got: 0x%X", int(checksum), int(responseChecksum));
+				ROS_ERROR("[FarrynSkidSteerDrive::getM2PIDQ %X] Expected checksum of: 0x%X, but got: 0x%X",
+				          gettid(), 
+				          int(checksum), 
+				          int(responseChecksum));
 				throw new TRoboClawException("[FarrynSkidSteerDrive::getM2PIDQ] INVALID CHECKSUM");
 			}
 
-        	ROS_DEBUG_COND(DEBUG, "<----- [FarrynSkidSteerDrive::getM2PIDQ] return");
+        	ROS_INFO_COND(DEBUG, "<----- [FarrynSkidSteerDrive::getM2PIDQ %X] return, %d, %d, %d, %d",
+        	              gettid(),
+        	              result.p,
+        	              result.i,
+        	              result.d,
+        	              result.q);
 			return result;
 		} catch (TRoboClawException* e) {
-			ROS_ERROR("[FarrynSkidSteerDrive::getM2PIDQ] Exception: %s, retry number: %d", e->what(), retry);
+			ROS_ERROR("[FarrynSkidSteerDrive::getM2PIDQ %X] Exception: %s, retry number: %d", gettid(), e->what(), retry);
+		} catch (...) {
+		    ROS_ERROR("[FarrynSkidSteerDrive::getM2PIDQ %X] Uncaught exception !!!", gettid());
 		}
 	}
 
-	ROS_ERROR("[FarrynSkidSteerDrive::getM2PIDQ] RETRY COUNT EXCEEDED");
-	ROS_DEBUG_COND(DEBUG, "<----- [FarrynSkidSteerDrive::getM2PIDQ] ERROR");
+	ROS_ERROR("<----- [FarrynSkidSteerDrive::getM2PIDQ %X] RETRY COUNT EXCEEDED", gettid());
 	throw new TRoboClawException("[FarrynSkidSteerDrive::getM2PIDQ] RETRY COUNT EXCEEDED");
 }
 
 string FarrynSkidSteerDrive::getVersion() {
 	boost::mutex::scoped_lock lock(roboClawLock);
-	ROS_DEBUG_COND(DEBUG, "-----> [FarrynSkidSteerDrive::getVersion]");
+	ROS_INFO_COND(DEBUG, "-----> [FarrynSkidSteerDrive::getVersion %X]", gettid());
 	int retry;
 
 	for (retry = 0; retry < MAX_COMMAND_RETRIES; retry++) {
@@ -732,34 +739,39 @@ string FarrynSkidSteerDrive::getVersion() {
 							throw new TRoboClawException("[FarrynSkidSteerDrive::getVersion] INVALID CHECKSUM");
 						}
 
-                    	ROS_DEBUG_COND(DEBUG, "<----- [FarrynSkidSteerDrive::getVersion] return");
+                    	ROS_INFO_COND(DEBUG, "<----- [FarrynSkidSteerDrive::getVersion %X]", gettid());
 						return version.str();
 					}
 				}
 			}
 
-			ROS_ERROR("[FarrynSkidSteerDrive::getVersion] unexpected long string");
+			ROS_ERROR("[FarrynSkidSteerDrive::getVersion %X] unexpected long string", gettid());
 			throw new TRoboClawException("[FarrynSkidSteerDrive::getVersion] unexpected long string");
 		} catch (TRoboClawException* e) {
-			ROS_ERROR("[FarrynSkidSteerDrive::getVersion] Exception: %s, retry number: %d", e->what(), retry);
+			ROS_ERROR("[FarrynSkidSteerDrive::getVersion %X] Exception: %s, retry number: %d", gettid(), e->what(), retry);
+		} catch (...) {
+		    ROS_ERROR("[FarrynSkidSteerDrive::getVersion %X] Uncaught exception !!!", gettid());
 		}
 	}
 
 
-	ROS_ERROR("[FarrynSkidSteerDrive::getVersion] RETRY COUNT EXCEEDED");
-	ROS_DEBUG_COND(DEBUG, "<----- [FarrynSkidSteerDrive::getVersion] ERROR");
+	ROS_ERROR("<----- [FarrynSkidSteerDrive::getVersion %X] RETRY COUNT EXCEEDED", gettid());
 	throw new TRoboClawException("[FarrynSkidSteerDrive::getVersion] RETRY COUNT EXCEEDED");
 }
 
 void FarrynSkidSteerDrive::queueThread() {
 	static const double timeout = 0.01;
 
+    ROS_INFO("[FarrynSkidSteerDrive::queueThread %X] startup", gettid());
 	while (alive && rosNode->ok()) {
 		queue.callAvailable(ros::WallDuration(timeout));
 	}
+	
+	ROS_INFO("[FarrynSkidSteerDrive::queueThread %X] shutdown", gettid());
 }
 
 void FarrynSkidSteerDrive::robotMotorController() {
+    ROS_INFO("[FarrynSkidSteerDrive::robotMotorController %X] startup", gettid());
     while (1) {
         geometry_msgs::Twist cmd_msg;
         twistQueue.Consume(cmd_msg);
@@ -768,16 +780,20 @@ void FarrynSkidSteerDrive::robotMotorController() {
         drive(velocity, angle);
         usleep(1000);
     }
+    
+    ROS_INFO("[FarrynSkidSteerDrive::robotMotorController %X] shutdown", gettid());
 }
 
 void FarrynSkidSteerDrive::roboClawStatusReader() {
-	ROS_INFO("FarrynSkidSteerDrive::roboClawStatusReader start");
+    ROS_INFO("[FarrynSkidSteerDrive::roboClawStatusReader %X] startup", gettid());
+    uint32_t sequenceCount = 0;
 	ros::Publisher statusPublisher = rosNode->advertise<farryn_controller::RoboClawStatus>("/RoboClawStatus", 1);
 	ros::Rate rate(1);
 	uint32_t counter = 0;
 	roboClawStatus.firmwareVersion = getVersion();
 	while (rosNode->ok()) {
 		try {
+		    ROS_INFO_COND(DEBUG, "[FarrynSkidSteerDrive::roboClawStatusReader %X] sequence: %d", gettid(), sequenceCount++);
 			uint8_t errorStatus = getErrorStatus();
 			roboClawStatus.errorStatus = errorStatus;
 			roboClawStatus.stickyErrorStatus |= errorStatus;
@@ -841,15 +857,21 @@ void FarrynSkidSteerDrive::roboClawStatusReader() {
 			roboClawStatus.m2D = pidq.d / 65536.0;
 			roboClawStatus.m2Qpps = pidq.q;
 
-			EncodeResult encoder = getEncoderCommandResult(GETM1ENC);
-			roboClawStatus.encoderM1value = encoder.value;
-			roboClawStatus.encoderM1Status = encoder.status;
-			lastM1Position = encoder.value;
+            {
+                boost::mutex::scoped_lock lock(roboClawLock);
+                EncodeResult encoder = getEncoderCommandResult(GETM1ENC);
+                roboClawStatus.encoderM1value = encoder.value;
+                roboClawStatus.encoderM1Status = encoder.status;
+                lastM1Position = encoder.value;
+            }
 
-			encoder = getEncoderCommandResult(GETM2ENC);
-			roboClawStatus.encoderM2value = encoder.value;
-			roboClawStatus.encoderM2Status = encoder.status;
-			lastM2Position = encoder.value;
+            {
+                boost::mutex::scoped_lock lock(roboClawLock);
+                EncodeResult encoder = getEncoderCommandResult(GETM2ENC);
+                roboClawStatus.encoderM2value = encoder.value;
+                roboClawStatus.encoderM2Status = encoder.status;
+                lastM2Position = encoder.value;
+            }
 			
 			roboClawStatus.expectedM1Speed = expectedM1Speed;
 			roboClawStatus.expectedM2Speed = expectedM2Speed;
@@ -868,13 +890,17 @@ void FarrynSkidSteerDrive::roboClawStatusReader() {
 			statusPublisher.publish(roboClawStatus);
 			rate.sleep();
 		} catch (TRoboClawException* e) {
-			ROS_ERROR("[FarrynSkidSteerDrive::roboClawStatusReader] Exception: %s", e->what());
+			ROS_ERROR("[FarrynSkidSteerDrive::roboClawStatusReader %X] Exception: %s", gettid(), e->what());
+		} catch (...) {
+		    ROS_ERROR("[FarrynSkidSteerDrive::roboClawStatusReader %X] Uncaught exception !!!", gettid());
 		}
 	}
+	
+	ROS_INFO("[FarrynSkidSteerDrive::roboClawStatusReader %X] shutdown", gettid());
 }
 
 uint8_t FarrynSkidSteerDrive::readByteWithTimeout() {
-	ROS_DEBUG_COND(DEBUG, "[FarrynSkidSteerDrive::readByteWithTimeout]");
+	ROS_INFO_COND(DEBUG, "[FarrynSkidSteerDrive::readByteWithTimeout %X]", gettid());
 
 	struct pollfd ufd[1];
 	ufd[0].fd = clawPort;
@@ -882,36 +908,95 @@ uint8_t FarrynSkidSteerDrive::readByteWithTimeout() {
 
 	int retval = poll(ufd, 1, 100);
 	if (retval < 0) {
-		ROS_ERROR("[FarrynSkidSteerDrive::readByteWithTimeout] Poll failed (%d) %s", errno, strerror(errno));
+		ROS_ERROR("[FarrynSkidSteerDrive::readByteWithTimeout %X] Poll failed (%d) %s", gettid(), errno, strerror(errno));
 		throw new TRoboClawException("[FarrynSkidSteerDrive::readByteWithTimeout] Read error");
 	} else if (retval == 0) {
 		stringstream ev;
-		ev << "[FarrynSkidSteerDrive::readByteWithTimeout] TIMEOUT revents: " << hex << ufd[0].revents;
+		ev << "[FarrynSkidSteerDrive::readByteWithTimeout " << hex << gettid() << "] TIMEOUT revents: " << hex << ufd[0].revents;
 		ROS_ERROR_STREAM(ev.str());
 		throw new TRoboClawException("[FarrynSkidSteerDrive::readByteWithTimeout] TIMEOUT");
 	} else if (ufd[0].revents & POLLERR) {
-		ROS_ERROR("[FarrynSkidSteerDrive::readByteWithTimeout] Error on socket");
+		ROS_ERROR("[FarrynSkidSteerDrive::readByteWithTimeout %X] Error on socket", gettid());
+		restartUsb();
 		throw new TRoboClawException("[FarrynSkidSteerDrive::readByteWithTimeout] Error on socket");
 	} else if (ufd[0].revents & POLLIN) {
 		char buffer[1];
 		int bytesRead = read(clawPort, buffer, sizeof(buffer));
 		if (bytesRead != 1) {
-			usleep(15000); // ### Timeout/flush RoboClaw.
-			ROS_ERROR("[FarrynSkidSteerDrive::readByteWithTimeout] Failed to read 1 byte, read: %d", bytesRead);
+			ROS_ERROR("[FarrynSkidSteerDrive::readByteWithTimeout %X] Failed to read 1 byte, read: %d", gettid(), bytesRead);
 			throw TRoboClawException("[FarrynSkidSteerDrive::readByteWithTimeout] Failed to read 1 byte");
 		}
 
-		ROS_DEBUG_COND(DEBUG, "[FarrynSkidSteerDrive::readByteWithTimeout] ...byte: 0x%X", int(buffer[0]));
+		ROS_INFO_COND(DEBUG, "[FarrynSkidSteerDrive::readByteWithTimeout %X] ...result: 0x%X", gettid(), int(buffer[0]));
 		return buffer[0];
 	} else {
-		ROS_ERROR("[FarrynSkidSteerDrive::readByteWithTimeout] Unhandled case");
+		ROS_ERROR("[FarrynSkidSteerDrive::readByteWithTimeout] %X Unhandled case", gettid());
 		throw new TRoboClawException("[FarrynSkidSteerDrive::readByteWithTimeout] Unhandled case");
 	}
 }
 
+void FarrynSkidSteerDrive::openUsb() {
+	clawPort = open(motorUSBPort.c_str(), O_RDWR | O_NOCTTY);
+	if (clawPort == -1) {
+		ROS_ERROR("[FarrynSkidSteerDrive::openUsb] Unable to open USB port, errno: (%d) %s", errno, strerror(errno));
+		throw new TRoboClawException("[FarrynSkidSteerDrive::openUsb] Unable to open USB port");
+	}
+
+	// if (ioctl(clawPort, USBDEVFS_RESET, 0) == -1) {
+	// 	ROS_ERROR("[FarrynSkidSteerDrive::FarrynSkidSteerDrive] Unable to reset USB port, error (%d) %s", errno, strerror(errno));
+	// 	throw new TRoboClawException("[FarrynSkidSteerDrive::FarrynSkidSteerDrive] Unable to reset USB port");
+ //  	}
+
+//   	lock.l_type = F_WRLCK;
+// 	lock.l_whence = SEEK_SET;
+// 	lock.l_start = 0;
+// 	lock.l_len = 0;
+// 	lock.l_pid = getpid();
+// 	if (fcntl(clawPort, F_SETLK, &lock) != 0) {
+// 		ROS_ERROR("[FarrynSkidSteerDrive::FarrynSkidSteerDrive] Device is already locked");
+// 		throw new TRoboClawException("[FarrynSkidSteerDrive::FarrynSkidSteerDrive] Device is already locked");
+// 	}
+
+    // Fetch the current port settings.
+	struct termios portOptions;
+	tcgetattr(clawPort, &portOptions);
+	memset(&portOptions.c_cc, 0, sizeof(portOptions.c_cc));
+
+    // Flush the port's buffers (in and out) before we start using it.
+    tcflush(clawPort, TCIOFLUSH);
+
+    // Set the input and output baud rates.
+    cfsetispeed(&portOptions, B115200);
+    cfsetospeed(&portOptions, B115200);
+
+    // c_cflag contains a few important things- CLOCAL and CREAD, to prevent
+    //   this program from "owning" the port and to enable receipt of data.
+    //   Also, it holds the settings for number of data bits, parity, stop bits,
+    //   and hardware flow control. 
+    portOptions.c_cflag = CS8 | CLOCAL | CREAD;
+    portOptions.c_iflag = IGNPAR;
+    portOptions.c_oflag = 0;
+    portOptions.c_lflag = 0;
+
+    // Now that we've populated our options structure, let's push it back to the system.
+    if (tcsetattr(clawPort, TCSANOW, &portOptions) < 0) {
+		ROS_ERROR("[FarrynSkidSteerDrive::openUsb] Unable to set terminal options (tcsetattr)");
+		throw new TRoboClawException("[FarrynSkidSteerDrive::openUsb] Unable to set terminal options (tcsetattr)");
+    }
+}
+
+void FarrynSkidSteerDrive::restartUsb() {
+    ROS_ERROR("-----> [FarrynSkidSteerDrive::restartUsb %X]", gettid());
+    int result = ioctl(clawPort, USBDEVFS_RESET, 0);
+    ROS_ERROR("[FarrynSkidSteerDrive::restartUsb %X] ioctl result: %d", gettid(), result);
+    close(clawPort);
+    openUsb();
+    ROS_ERROR("<----- [FarrynSkidSteerDrive::restartUsb %X] ioctl result: %d", gettid(), result);
+}
+
 void FarrynSkidSteerDrive::setM1PID(float p, float i, float d, uint32_t qpps) {
 	boost::mutex::scoped_lock lock(roboClawLock);
-	ROS_DEBUG_COND(DEBUG, "-----> [FarrynSkidSteerDrive::setM1PID(] p: %f, i: %f, d: %f, qpps: %d", p, i, d, qpps);
+	ROS_INFO_COND(DEBUG, "-----> [FarrynSkidSteerDrive::setM1PID %X] p: %f, i: %f, d: %f, qpps: %d", gettid(), p, i, d, qpps);
 	int retry;
 
 	for (retry = 0; retry < MAX_COMMAND_RETRIES; retry++) {
@@ -924,21 +1009,22 @@ void FarrynSkidSteerDrive::setM1PID(float p, float i, float d, uint32_t qpps) {
 				   SetDWORDval(kp),
 				   SetDWORDval(ki),
 				   SetDWORDval(qpps));
-        	ROS_DEBUG_COND(DEBUG, "<----- [FarrynSkidSteerDrive::setM1PID(] return");
+        	ROS_INFO_COND(DEBUG, "<----- [FarrynSkidSteerDrive::setM1PID %X]", gettid());
 			return;
 		} catch (TRoboClawException* e) {
-			ROS_ERROR("[FarrynSkidSteerDrive::setM1PID] Exception: %s, retry number: %d", e->what(), retry);
+			ROS_ERROR("[FarrynSkidSteerDrive::setM1PID %X] Exception: %s, retry number: %d", gettid(), e->what(), retry);
+		} catch (...) {
+		    ROS_ERROR("[FarrynSkidSteerDrive::setM1PID %X] Uncaught exception !!!", gettid());
 		}
 	}
 
-	ROS_ERROR("[FarrynSkidSteerDrive::setM1PID] RETRY COUNT EXCEEDED");
-	ROS_DEBUG_COND(DEBUG, "<----- [FarrynSkidSteerDrive::setM1PID(] ERROR");
+	ROS_ERROR("<----- [FarrynSkidSteerDrive::setM1PID] RETRY COUNT EXCEEDED %X", gettid());
 	throw new TRoboClawException("[FarrynSkidSteerDrive::setM1PID] RETRY COUNT EXCEEDED");
 }
 
 void FarrynSkidSteerDrive::setM2PID(float p, float i, float d, uint32_t qpps) {
 	boost::mutex::scoped_lock lock(roboClawLock);
-	ROS_DEBUG_COND(DEBUG, "-----> [FarrynSkidSteerDrive::setM2PID(] p: %f, i: %f, d: %f, qpps: %d", p, i, d, qpps);
+	ROS_INFO_COND(DEBUG, "-----> [FarrynSkidSteerDrive::setM2PID %X] p: %f, i: %f, d: %f, qpps: %d", gettid(), p, i, d, qpps);
 	int retry;
 
 	for (retry = 0; retry < MAX_COMMAND_RETRIES; retry++) {
@@ -951,20 +1037,27 @@ void FarrynSkidSteerDrive::setM2PID(float p, float i, float d, uint32_t qpps) {
 				   SetDWORDval(kp),
 				   SetDWORDval(ki),
 				   SetDWORDval(qpps));
-        	ROS_DEBUG_COND(DEBUG, "<----- [FarrynSkidSteerDrive::setM2PID(] return");
+        	ROS_INFO_COND(DEBUG, "<----- [FarrynSkidSteerDrive::setM2PID %X]", gettid());
 			return;
 		} catch (TRoboClawException* e) {
-			ROS_ERROR("[FarrynSkidSteerDrive::setM2PID] Exception: %s, retry number: %d", e->what(), retry);
+			ROS_ERROR("[FarrynSkidSteerDrive::setM2PID %X] Exception: %s, retry number: %d", gettid(), e->what(), retry);
+		} catch (...) {
+		    ROS_ERROR("[FarrynSkidSteerDrive::setM2PID %X] Uncaught exception !!!", gettid());
 		}
 	}
 
-	ROS_ERROR("[FarrynSkidSteerDrive::setM2PID] RETRY COUNT EXCEEDED");
-	ROS_DEBUG_COND(DEBUG, "<----- [FarrynSkidSteerDrive::setM2PID(] ERROR");
+	ROS_ERROR("<----- [FarrynSkidSteerDrive::setM2PID %X] RETRY COUNT EXCEEDED", gettid());
 	throw new TRoboClawException("[FarrynSkidSteerDrive::setM2PID] RETRY COUNT EXCEEDED");
 }
 
 // Command motors to a given linear and angular velocity
 void FarrynSkidSteerDrive::setVelocities(double v, double w, int32_t* left_qpps, int32_t* right_qpps) {
+    ROS_INFO_COND(DEBUG, "[FarrynSkidSteerDrive::setVelocities %X], v: %f, w: %f, left_qpps: %d, right_qpps: %d",
+                  gettid(),
+                  v,
+                  w,
+                  left_qpps,
+                  right_qpps);
 	double wmag = fabs(w);
 	double vmag = fabs(v);
 
@@ -1002,7 +1095,7 @@ void FarrynSkidSteerDrive::setVelocities(double v, double w, int32_t* left_qpps,
 
 void FarrynSkidSteerDrive::stop() {
 	boost::mutex::scoped_lock lock(roboClawLock);
-	ROS_INFO_STREAM("-----> [FarrynSkidSteerDrive::stop] command: " << MIXEDSPEED);
+	ROS_INFO_COND(DEBUG, "-----> [FarrynSkidSteerDrive::stop %X] command: 0x%X", gettid(), MIXEDSPEED);
 	int retry;
 
 	for (retry = 0; retry < MAX_COMMAND_RETRIES; retry++) {
@@ -1014,27 +1107,29 @@ void FarrynSkidSteerDrive::stop() {
 				SetDWORDval(0),
 				1 /* Cancel any previous command */
 				);
-            ROS_INFO_STREAM("<----- [FarrynSkidSteerDrive::stop] return");
+            ROS_INFO("<----- [FarrynSkidSteerDrive::stop %X]", gettid());
             expectedM1Speed = 0;
             expectedM2Speed = 0;
             maxM1Distance = 0;
             maxM2Distance = 0;
 			return;
 		} catch (TRoboClawException* e) {
-			ROS_ERROR("[FarrynSkidSteerDrive::stop] Exception: %s, retry number: %d", e->what(), retry);
+			ROS_ERROR("[FarrynSkidSteerDrive::stop %X] Exception: %s, retry number: %d", gettid(), e->what(), retry);
+		} catch (...) {
+		    ROS_ERROR("[FarrynSkidSteerDrive::stop %X] Uncaught exception !!!", gettid());
 		}
 	}
 
-	ROS_ERROR("[FarrynSkidSteerDrive::stop] RETRY COUNT EXCEEDED");
-	ROS_INFO_STREAM("<----- [FarrynSkidSteerDrive::stop] ERROR");
+	ROS_ERROR("<----- [FarrynSkidSteerDrive::stop %X] RETRY COUNT EXCEEDED", gettid());
 	throw new TRoboClawException("[FarrynSkidSteerDrive::stop] RETRY COUNT EXCEEDED");
 }
 
 void FarrynSkidSteerDrive::updateOdometry() {
-	ROS_INFO("FarrynSkidSteerDrive::updateOdometry start");
+    ROS_INFO("[FarrynSkidSteerDrive::updateOdometry %X] startup", gettid());
 	ros::Publisher odometryPublisher = rosNode->advertise<nav_msgs::Odometry>("odom", 50);
 	tf::TransformBroadcaster odomBroadcaster;
 	
+	uint32_t sequenceCount = 0;
     ros::Time currentTime;
 	ros::Time lastTime = ros::Time::now();	
 	int32_t lastM1Encoder = getM1Encoder();
@@ -1074,22 +1169,25 @@ void FarrynSkidSteerDrive::updateOdometry() {
 		    tf::Vector3 vt;
 		    qt.setRPY(0, 0, poseEncoderTheta);
 		    vt = tf::Vector3(poseEncoderX, poseEncoderY, 0);
-        	ROS_DEBUG_COND(1/*#####DEBUG*****/, 
-        	               "    [FarrynSkidSteerDrive::updateOdometry] "
-        	                  "dt: %f"
+        	ROS_INFO_COND(1/*#####DEBUG*****/, 
+        	               "    [FarrynSkidSteerDrive::updateOdometry %X] "
+        	                  "sequence: %d"
+        	                  ", dt: %f"
         	                  ", m1Encoder: %d"
         	                  ", m1DeltaDistance: %f"
         	                  ", m2Encoder: %d"
         	                  ", m2DeltaDistance: %f"
         	                  ", theta: %f",
+        	               gettid(),
+        	               sequenceCount++,
         	               dt,
         	               m1Encoder,
         	               m1DeltaDistance,
         	               m2Encoder,
         	               m2DeltaDistance,
         	               theta);
-        	ROS_DEBUG_COND(1/*#####DEBUG*****/, 
-        	               "    [FarrynSkidSteerDrive::updateOdometry] "
+        	ROS_INFO_COND(1/*#####DEBUG*****/, 
+        	               "    [FarrynSkidSteerDrive::updateOdometry %X] "
         	                  "dx: %f"
         	                  ", dy: %f"
         	                  ", dtheta: %f"
@@ -1098,6 +1196,7 @@ void FarrynSkidSteerDrive::updateOdometry() {
         	                  ", poseEncoderTheta: %f"
         	                  ", w: %f"
         	                  ", v: %f",
+        	               gettid(),
         	               dx,
         	               dy,
         	               dtheta,
@@ -1144,7 +1243,9 @@ void FarrynSkidSteerDrive::updateOdometry() {
 		    lastTime = currentTime;
 		    rate.sleep();
 		} catch (TRoboClawException* e) {
-			ROS_ERROR("[FarrynSkidSteerDrive::roboClawStatusReader] Exception: %s", e->what());
+			ROS_ERROR("[FarrynSkidSteerDrive::roboClawStatusReader %X] Exception: %s", gettid(), e->what());
+		} catch (...) {
+		    ROS_ERROR("[FarrynSkidSteerDrive::roboClawStatusReader %X] Uncaught exception !!!", gettid());
 		}
 	}
 }
@@ -1185,10 +1286,11 @@ void FarrynSkidSteerDrive::vwToWheelSpeed(double v, double w, double *left_mps, 
 }
 
 void FarrynSkidSteerDrive::writeByte(uint8_t byte) {
-	ROS_DEBUG_COND(DEBUG, "[FarrynSkidSteerDrive::writeByte] byte: 0x%X", byte);
+	ROS_INFO_COND(DEBUG, "[FarrynSkidSteerDrive::writeByte %X] byte: 0x%X", gettid(), byte);
 	ssize_t result = write(clawPort, &byte, 1);
 	if (result != 1) {
-		ROS_ERROR("[FarrynSkidSteerDrive::writeByte] Unable to write one byte, result: %d, errno: %d)", result,  errno);
+		ROS_ERROR("[FarrynSkidSteerDrive::writeByte %X] Unable to write one byte, result: %d, errno: %d)", gettid(), result,  errno);
+		restartUsb();
 		throw new TRoboClawException("[FarrynSkidSteerDrive::writeByte] Unable to write one byte");
 	}
 }
@@ -1201,9 +1303,9 @@ void FarrynSkidSteerDrive::writeN(bool sendChecksum, uint8_t cnt, ...) {
 	uint16_t dataIndex = 0;
 
 	int origFlags = fcntl(clawPort, F_GETFL, 0);
-	//	fcntl(clawPort, F_SETFL, origFlags & ~O_NONBLOCK);
+	fcntl(clawPort, F_SETFL, origFlags & ~O_NONBLOCK);
 
-    usleep(1000);
+    usleep(20000);
 
 	uint8_t checksum = 0;
 	for (uint8_t i = 0; i < cnt; i++) {
@@ -1219,13 +1321,15 @@ void FarrynSkidSteerDrive::writeN(bool sendChecksum, uint8_t cnt, ...) {
 		//data[dataIndex++] = (checksum & 0x7F) | 0x80;
 		writeByte((checksum & 0x7F) | 0x80);
 	}
+
 	if (sendChecksum) {
 		uint8_t response = readByteWithTimeout();
 		if (response != 0xFF) {
-			ROS_ERROR("[FarrynSkidSteerDrive::writeByte] Invalid ACK response");
-			throw new TRoboClawException("[FarrynSkidSteerDrive::writeByte] Invalid ACK response");
+			ROS_ERROR("[FarrynSkidSteerDrive::writeN %X] Invalid ACK response", gettid());
+			throw new TRoboClawException("[FarrynSkidSteerDrive::writeN] Invalid ACK response");
 		}
 	}
+
+	fcntl(clawPort, F_SETFL, origFlags);
 }
 
-boost::mutex FarrynSkidSteerDrive::roboClawLock;

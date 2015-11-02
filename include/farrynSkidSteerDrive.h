@@ -80,7 +80,7 @@ private:
 	double	updateRate_;
 	double	updatePeriod_;
 
-	static boost::mutex roboClawLock; // Mutex for access to roboclaw via USB.
+	//static boost::mutex roboClawLock; // Mutex for access to roboclaw via USB.
 	boost::thread roboClawStatusReaderThread; // Periodically read and publish RoboClaw status.
 	boost::thread roboClawMotorControllerThread; // Periodically dequeue and execute motor commands.
 	boost::thread roboClawOdometryThread; // Publish odometry.
@@ -186,7 +186,7 @@ private:
 	bool alive;
 	boost::thread callbackQueueThread;
 	string cmdVelTopic;
-	struct flock lock;
+	//#####struct flock lock;
 	string motorUSBPort;
 	ros::CallbackQueue queue;
 
@@ -210,10 +210,14 @@ private:
 	unsigned long getUlongCommandResult(uint8_t command);
 
 	ULongPair getULongPairCommandResult(uint8_t command);
+	
+	void  openUsb();
 
 	void queueThread();
 
 	uint8_t readByteWithTimeout();
+	
+	void restartUsb();
 
 	void roboClawStatusReader();
 

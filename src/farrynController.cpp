@@ -37,9 +37,11 @@ int main(int argc, char **argv) {
 
 			ros::spinOnce();
 			r.sleep();
-		} catch (FarrynSkidSteerDrive::TRoboClawException* e) {
+		} catch(FarrynSkidSteerDrive::TRoboClawException* e) {
 			ROS_ERROR("[MAIN] Exception: %s", e->what());
-		}
+		} catch(...) {
+		    ROS_ERROR("[MAIN] Unhangled exception");
+        }
 	}
 
 	return 0;
