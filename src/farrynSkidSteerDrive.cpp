@@ -947,10 +947,10 @@ void FarrynSkidSteerDrive::openUsb() {
 		throw new TRoboClawException("[FarrynSkidSteerDrive::openUsb] Unable to open USB port");
 	}
 
-	if (ioctl(clawPort, USBDEVFS_RESET, 0) == -1) {
-		ROS_WARN("[FarrynSkidSteerDrive::FarrynSkidSteerDrive] Unable to reset USB port, error (%d) %s", errno, strerror(errno));
-		//throw new TRoboClawException("[FarrynSkidSteerDrive::FarrynSkidSteerDrive] Unable to reset USB port");
-  	}
+// 	if (ioctl(clawPort, USBDEVFS_RESET, 0) == -1) {
+// 		ROS_WARN("[FarrynSkidSteerDrive::FarrynSkidSteerDrive] Unable to reset USB port, error (%d) %s", errno, strerror(errno));
+// 		//throw new TRoboClawException("[FarrynSkidSteerDrive::FarrynSkidSteerDrive] Unable to reset USB port");
+//   	}
 
 	struct flock lock;
   	lock.l_type = F_WRLCK;
@@ -1158,13 +1158,13 @@ void FarrynSkidSteerDrive::updateOdometry() {
 		    int32_t m2Encoder = getM2Encoder();
 		    double m1DeltaDistance = (m1Encoder - lastM1Encoder) / quad_pulse_per_meter_;
 		    double m2DeltaDistance = (m2Encoder - lastM2Encoder) / quad_pulse_per_meter_;
-		    double theta = (m1DeltaDistance - m2DeltaDistance) / axle_width_;
+		    double theta = (m2DeltaDistance - m1DeltaDistance) / axle_width_;
 		    lastM1Encoder = m1Encoder;
 		    lastM2Encoder = m2Encoder;
 		    
-		    double dx = (m1DeltaDistance + m2DeltaDistance) / 2.0 * cos(poseEncoderTheta + (m1DeltaDistance - m2DeltaDistance) / (2.0 * axle_width_));
-		    double dy = (m1DeltaDistance + m2DeltaDistance) / 2.0 * sin(poseEncoderTheta + (m1DeltaDistance - m2DeltaDistance) / (2.0 * axle_width_));
-		    double dtheta = (m1DeltaDistance - m2DeltaDistance) / axle_width_;
+		    double dx = (m1DeltaDistance + m2DeltaDistance) / 2.0 * cos(poseEncoderTheta + (m2DeltaDistance - m1DeltaDistance) / (2.0 * axle_width_));
+		    double dy = (m1DeltaDistance + m2DeltaDistance) / 2.0 * sin(poseEncoderTheta + (m2DeltaDistance - m1DeltaDistance) / (2.0 * axle_width_));
+		    double dtheta = (m2DeltaDistance - m1DeltaDistance) / axle_width_;
 		    poseEncoderX += dx;
 		    poseEncoderY += dy;
 		    poseEncoderTheta += dtheta;
