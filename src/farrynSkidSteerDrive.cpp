@@ -34,11 +34,11 @@
 
 // 7.5 inches in meters.
 #define axle_width_ 0.1905
-#define quad_pulse_per_meter_ 8883.098
+#define quad_pulse_per_meter_ 6353.4523937932416
 
 // Max no-load speed = 160 RPM
-#define meters_per_revolution 0.13508800645901
-#define pulses_per_inch 225.6306892
+#define meters_per_revolution 0.1888736903376
+#define pulses_per_inch 161.37769080234834
 
 boost::mutex roboClawLock;
 
@@ -1162,14 +1162,16 @@ void FarrynSkidSteerDrive::updateOdometry() {
 		    lastM1Encoder = m1Encoder;
 		    lastM2Encoder = m2Encoder;
 		    
-		    double dx = (m1DeltaDistance + m2DeltaDistance) / 2.0 * cos(poseEncoderTheta + (m2DeltaDistance - m1DeltaDistance) / (2.0 * axle_width_));
-		    double dy = (m1DeltaDistance + m2DeltaDistance) / 2.0 * sin(poseEncoderTheta + (m2DeltaDistance - m1DeltaDistance) / (2.0 * axle_width_));
-		    double dtheta = (m2DeltaDistance - m1DeltaDistance) / axle_width_;
+		    double s_ = (m1DeltaDistance + m2DeltaDistance) / 2.0;
+		    double theta_ =  (m2DeltaDistance - m1DeltaDistance) / (2.0 * axle_width_);
+		    
+		    double dx = s_ * cos(/*poseEncoderTheta +*/ theta_);
+		    double dy = s_ * sin(/*poseEncoderTheta +*/ theta_);
 		    poseEncoderX += dx;
 		    poseEncoderY += dy;
-		    poseEncoderTheta += dtheta;
+		    poseEncoderTheta += theta;
 		    
-		    double w = dtheta / dt;
+		    double w = theta / dt;
 		    double v = sqrt((dx * dx) + (dy * dy)) / dt;
 		    
 		    tf::Quaternion qt;
@@ -1197,7 +1199,7 @@ void FarrynSkidSteerDrive::updateOdometry() {
         	               "    [FarrynSkidSteerDrive::updateOdometry %X] "
         	                  "dx: %f"
         	                  ", dy: %f"
-        	                  ", dtheta: %f"
+        	                  ", theta: %f"
         	                  ", poseEncoderX: %f"
         	                  ", poseEncoderY: %f"
         	                  ", poseEncoderTheta: %f"
@@ -1206,7 +1208,7 @@ void FarrynSkidSteerDrive::updateOdometry() {
         	               gettid(),
         	               dx,
         	               dy,
-        	               dtheta,
+        	               theta,
         	               poseEncoderX,
         	               poseEncoderY,
         	               poseEncoderTheta,
