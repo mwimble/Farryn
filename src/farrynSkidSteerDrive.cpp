@@ -6,11 +6,14 @@
 // On exception, clear queue by waiting 10ms.
 // Capture speed, update last speed.
 
+#include <dirent.h>
 #include <fcntl.h>
+#include <glob.h>
 #include <iostream>
 #include <nav_msgs/Odometry.h>
 #include <poll.h>
 #include <pthread.h>
+#include <regex.h>
 #include <sstream>
 #include <stdarg.h>
 #include <stdio.h>
@@ -33,14 +36,121 @@
 #define SetDWORDval(arg) (uint8_t)(arg>>24),(uint8_t)(arg>>16),(uint8_t)(arg>>8),(uint8_t)arg
 
 // 7.5 inches in meters.
-#define axle_width_ 0.1905
-#define quad_pulse_per_meter_ 6353.4523937932416
+#define axle_width_ 0.2
+//0.1905
+
+#define quad_pulse_per_meter_ 9517.72482621210435
+//6353.4523937932416
 
 // Max no-load speed = 160 RPM
-#define meters_per_revolution 0.1888736903376
-#define pulses_per_inch 161.37769080234834
+// #define meters_per_revolution 0.1888736903376
+// #define pulses_per_inch 161.37769080234834
 
 boost::mutex roboClawLock;
+
+char* findUsbDeviceByVendorId(const char* vendorId) {
+    glob_t vendorGlob;
+    int vendorGlobErr = 0;
+    
+    // Start by looking for all USB devices in the system that have an 'idVendor' file.
+    if ((vendorGlobErr = glob("/sys/bus/usb/devices/*/idVendor", 0, NULL, &vendorGlob)) == 0) {
+
+        // Found one or more idVendor files. Find the one wth a value matching the parameter.
+        for (unsigned int vendorGlobI = 0; vendorGlobI < vendorGlob.gl_pathc; vendorGlobI++) {
+            FILE* vendorFile = fopen(vendorGlob.gl_pathv[vendorGlobI], "r");
+            if (vendorFile != NULL) {
+                char *vendor = NULL;
+                size_t len = 0;
+                getline(&vendor, &len, vendorFile);
+                if (vendor[strlen(vendor) - 1] == '\n') vendor[strlen(vendor) - 1] = '\0'; // Remove any trailing space.
+
+                printf("idVendor path[%d]: '%s', value: %s\n", vendorGlobI, vendorGlob.gl_pathv[vendorGlobI], vendor);
+                
+                if (strcmp(vendor, vendorId) != 0) {
+                    // Not a match, go on to next one.
+                    if (vendor) free(vendor);
+                    continue;
+                } else {
+                    printf("Found matching vendor value: '%s' at path: '%s'\n", vendor, vendorGlob.gl_pathv[vendorGlobI]);
+                }
+                
+                if (vendor) free(vendor);
+                
+                // Pull out the path of the directory containing the idVendor file.
+                regex_t parentRegex;
+                regmatch_t parentRegexMatch[2];
+                int regexResult;
+                if (regcomp(&parentRegex, "^(.*)idVendor[ \t\n]*$", REG_EXTENDED)) {
+                    printf("!!! Unable to compile regex\n");
+                    exit(EXIT_FAILURE);
+                }
+
+                if ((regexResult = regexec(&parentRegex, vendorGlob.gl_pathv[vendorGlobI], 2, parentRegexMatch, 0)) == 0) {
+                    // Regex pulled out the parent path prefix from the idVendor full path. Form a path for just the parent directory.
+                    char parentPath[strlen(vendorGlob.gl_pathv[vendorGlobI])];
+                    strcpy(parentPath, vendorGlob.gl_pathv[vendorGlobI]);
+                    parentPath[parentRegexMatch[1].rm_eo] = '\0';
+                    printf("... idVendor parent path: '%s'\n", parentPath);
+                    
+                    // Find subdirectories two levels down that have the name "tty" that are themselves a subdirectory
+                    // of a directory that has "tty" as part of it's name prefix. 
+                    glob_t ttyGlob;
+                    int ttyGlobErr = 0;
+                    const char *TTY_GLOB_SUFFIX = "*/tty*/tty";
+                    char ttyGlobPath[strlen(parentPath) + strlen(TTY_GLOB_SUFFIX) + 1]; // Reserve enough space for the glab expression.
+                    strcpy(ttyGlobPath, parentPath); // Start to form the glob expression.
+                    strcpy(&ttyGlobPath[strlen(ttyGlobPath)], TTY_GLOB_SUFFIX); // Finish the glob expresison.
+                    printf("... ttyGlobPath: '%s'\n", ttyGlobPath);
+                    if ((ttyGlobErr = glob(ttyGlobPath, 0, NULL, &ttyGlob)) == 0) {
+                        // We have found the required directory. There will be a directory under here whose name is the
+                        // device name under "/dev" for the USB device. E.g., if the directory is "ttyUSB0", then the
+                        // corresponding device name is "/dev/ttyUSB0".
+                        for (unsigned int ttyGlobI = 0; ttyGlobI < ttyGlob.gl_pathc; ttyGlobI++) {
+                            printf("... ... tty path[%d]: '%s'\n", ttyGlobI, ttyGlob.gl_pathv[ttyGlobI]);
+                            DIR *ttyDir;
+                            if ((ttyDir = opendir(ttyGlob.gl_pathv[ttyGlobI])) != NULL) {
+                                struct dirent *ttySubDir;
+                                while ((ttySubDir = readdir(ttyDir)) != NULL) {
+                                    if (ttySubDir->d_name[0] == '.') continue;
+                                    printf("### device name: '%s'\n", ttySubDir->d_name);
+                                    const char *RESULT_PREFIX = "/dev/";
+                                    char *result = (char*) malloc(strlen(ttySubDir->d_name) + strlen(RESULT_PREFIX) + 1);
+                                    strcpy(result, RESULT_PREFIX);
+                                    strcpy(&result[strlen(RESULT_PREFIX)], ttySubDir->d_name);
+                                    return result;
+                                }
+                                
+                                // Didn't find any directories in the subdirectory.
+                                return NULL;
+                            } else {
+                                // Could not read the subdirectory.
+                                return NULL;
+                            }
+                        } // for
+                        
+                        // No subdirectory found at all.
+                        return NULL;
+                    } else {
+                        // Didn't find the exprected subdirectory.
+                        return NULL;
+                    }
+                } else {
+                    // !!! Regex failure on idVendor glob.
+                    return NULL;
+                }
+            } else {
+                // Unable to read the idVendor file.
+                return NULL;
+            }
+        } // for
+        
+        // No match found for the parameter vendor ID.
+        return NULL;
+    } else {
+        // No vendor globs found.
+        return NULL;
+    }
+}
 
 uint32_t gettid() {
     return static_cast<int32_t>(pthread_self());
@@ -941,7 +1051,14 @@ uint8_t FarrynSkidSteerDrive::readByteWithTimeout() {
 }
 
 void FarrynSkidSteerDrive::openUsb() {
-	clawPort = open(motorUSBPort.c_str(), O_RDWR | O_NOCTTY);
+    const char *ROBOCLAW_VENDOR_ID = "03eb";
+    char *match = findUsbDeviceByVendorId(ROBOCLAW_VENDOR_ID);
+    if (match == NULL) {
+		ROS_ERROR("[FarrynSkidSteerDrive::openUsb] Unable to find USB port for RoboClaw vendor ID: '%s'", ROBOCLAW_VENDOR_ID);
+		throw new TRoboClawException("[FarrynSkidSteerDrive::openUsb] Unable to find USB port for RoboClaw vendor ID");
+    }
+    
+	clawPort = open(match, O_RDWR | O_NOCTTY);
 	if (clawPort == -1) {
 		ROS_ERROR("[FarrynSkidSteerDrive::openUsb] Unable to open USB port, errno: (%d) %s", errno, strerror(errno));
 		throw new TRoboClawException("[FarrynSkidSteerDrive::openUsb] Unable to open USB port");
@@ -969,8 +1086,8 @@ void FarrynSkidSteerDrive::openUsb() {
 	memset(&portOptions.c_cc, 0, sizeof(portOptions.c_cc));
 
     // Set the input and output baud rates.
-    //cfsetispeed(&portOptions, B115200);
-    //cfsetospeed(&portOptions, B115200);
+    cfsetispeed(&portOptions, B115200);
+    cfsetospeed(&portOptions, B115200);
 
     // c_cflag contains a few important things- CLOCAL and CREAD, to prevent
     //   this program from "owning" the port and to enable receipt of data.
@@ -986,7 +1103,7 @@ void FarrynSkidSteerDrive::openUsb() {
     // Now that we've populated our options structure, let's push it back to the system.
     if (tcsetattr(clawPort, TCSANOW, &portOptions) < 0) {
 		ROS_ERROR("[FarrynSkidSteerDrive::openUsb] Unable to set terminal options (tcsetattr)");
-		throw new TRoboClawException("[FarrynSkidSteerDrive::openUsb] Unable to set terminal options (tcsetattr)");
+ 		throw new TRoboClawException("[FarrynSkidSteerDrive::openUsb] Unable to set terminal options (tcsetattr)");
     }
 }
 
