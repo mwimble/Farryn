@@ -182,7 +182,7 @@ FarrynSkidSteerDrive::FarrynSkidSteerDrive() :
 	// }
 
 	alive = true;
-	updateRate_ = 100.0;
+	updateRate_ = 30.0;
 	updatePeriod_ = 1.0 / updateRate_;
 	M1_MAX_METERS_PER_SEC = 0.333;
 	M2_MAX_METERS_PER_SEC = 0.333;
@@ -1262,7 +1262,7 @@ void FarrynSkidSteerDrive::updateOdometry() {
 	double poseEncoderX = 0.0;
 	double poseEncoderY = 0.0;
 	double poseEncoderTheta = 0.0;
-	ros::Rate rate(100);
+	ros::Rate rate(30);
 	int retry;
 	
 	while (rosNode->ok()) {
@@ -1366,12 +1366,12 @@ void FarrynSkidSteerDrive::updateOdometry() {
             odomTrans.transform.rotation = odom_quat;
             odomBroadcaster.sendTransform(odomTrans);
 
-            laserBroadcaster.sendTransform(
-                tf::StampedTransform(
-                    tf::Transform(tf::Quaternion(0, 0, 0, 1), tf::Vector3(0.1, 0.0, 0.1)),
-                    ros::Time::now(),
-                    "base_link", 
-                    "base_laser"));
+//             laserBroadcaster.sendTransform(
+//                 tf::StampedTransform(
+//                     tf::Transform(tf::Quaternion(0, 0, 0, 1), tf::Vector3(0.1, 0.0, 0.1)),
+//                     ros::Time::now(),
+//                     "base_link", 
+//                     "base_laser"));
   		    lastTime = currentTime;
 		    rate.sleep();
 		} catch (TRoboClawException* e) {

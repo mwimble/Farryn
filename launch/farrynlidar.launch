@@ -2,15 +2,15 @@
   <node name="farryn_controller_node" pkg="farryn_controller"  type="farryn_controller_node" output="screen">
   	<rosparam command="load" file="$(find farryn_controller)/cfg/farryn_controller.yaml"/>
   </node>
-  <node pkg="razor_imu_9dof" type="imu_node.py" name="imu_node" output="screen">
+  <!--node pkg="razor_imu_9dof" type="imu_node.py" name="imu_node" output="screen">
     <rosparam file="$(find razor_imu_9dof)/config/my_razor.yaml" command="load"/>
-  </node>
+  </node-->
   <node name="rplidarNode"          pkg="rplidar_ros"  type="rplidarNode" output="screen">
-    <param name="serial_port"         type="string" value="/dev/ttyUSB0"/>  
+    <param name="serial_port"         type="string" value="/dev/ttyUSB1"/>
     <param name="serial_baudrate"     type="int"    value="115200"/>
     <param name="frame_id"            type="string" value="laser"/>
     <param name="inverted"            type="bool"   value="false"/>
     <param name="angle_compensate"    type="bool"   value="true"/>
   </node>
-  <node pkg="tf" type="static_transform_publisher" name="base_to_laser_broadcaster" args="0 0 0 0 0 0 base_link laser 100" />
+  <node pkg="tf" type="static_transform_publisher" name="base_to_laser_broadcaster" args="0 0 0 3.14159 0 0 base_link laser 100" />
 </launch>
