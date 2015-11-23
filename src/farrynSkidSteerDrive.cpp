@@ -96,7 +96,7 @@ char* findUsbDeviceByVendorId(const char* vendorId) {
                     // of a directory that has "tty" as part of it's name prefix. 
                     glob_t ttyGlob;
                     int ttyGlobErr = 0;
-                    const char *TTY_GLOB_SUFFIX = "*/tty*/tty";
+                    const char *TTY_GLOB_SUFFIX = "*/tty";
                     char ttyGlobPath[strlen(parentPath) + strlen(TTY_GLOB_SUFFIX) + 1]; // Reserve enough space for the glab expression.
                     strcpy(ttyGlobPath, parentPath); // Start to form the glob expression.
                     strcpy(&ttyGlobPath[strlen(ttyGlobPath)], TTY_GLOB_SUFFIX); // Finish the glob expresison.
@@ -905,7 +905,7 @@ void FarrynSkidSteerDrive::roboClawStatusReader() {
 	ros::Publisher statusPublisher = rosNode->advertise<farryn_controller::RoboClawStatus>("/RoboClawStatus", 1);
 	ros::Rate rate(1);
 	uint32_t counter = 0;
-	roboClawStatus.firmwareVersion = getVersion();
+	roboClawStatus.firmwareVersion = "foo version";//#####getVersion();
 	while (rosNode->ok()) {
 		try {
 		    ROS_INFO_COND(DEBUG, "[FarrynSkidSteerDrive::roboClawStatusReader %X] sequence: %d", gettid(), sequenceCount++);
@@ -1051,16 +1051,16 @@ uint8_t FarrynSkidSteerDrive::readByteWithTimeout() {
 }
 
 void FarrynSkidSteerDrive::openUsb() {
-    const char *ROBOCLAW_VENDOR_ID = "03eb";
-    char *match = findUsbDeviceByVendorId(ROBOCLAW_VENDOR_ID);
-    if (match == NULL) {
-		ROS_ERROR("[FarrynSkidSteerDrive::openUsb] Unable to find USB port for RoboClaw vendor ID: '%s'", ROBOCLAW_VENDOR_ID);
-		throw new TRoboClawException("[FarrynSkidSteerDrive::openUsb] Unable to find USB port for RoboClaw vendor ID");
-    }
+//     const char *ROBOCLAW_VENDOR_ID = "03eb";
+//     char *match = findUsbDeviceByVendorId(ROBOCLAW_VENDOR_ID);
+//     if (match == NULL) {
+// 		ROS_ERROR("[FarrynSkidSteerDrive::openUsb] Unable to find USB port for RoboClaw vendor ID: '%s'", ROBOCLAW_VENDOR_ID);
+// 		throw new TRoboClawException("[FarrynSkidSteerDrive::openUsb] Unable to find USB port for RoboClaw vendor ID");
+//     }
     
-	clawPort = open(match, O_RDWR | O_NOCTTY);
+	clawPort = open(motorUSBPort.c_str(), O_RDWR | O_NOCTTY);
 	if (clawPort == -1) {
-		ROS_ERROR("[FarrynSkidSteerDrive::openUsb] Unable to open USB port, errno: (%d) %s", errno, strerror(errno));
+		ROS_ERROR("[FarrynSkidSteerDrive::openUsb] Unable to open USB port '%s', errno: (%d) %s", motorUSBPort.c_str(), errno, strerror(errno));
 		throw new TRoboClawException("[FarrynSkidSteerDrive::openUsb] Unable to open USB port");
 	}
 
@@ -1246,6 +1246,14 @@ void FarrynSkidSteerDrive::stop() {
 	throw new TRoboClawException("[FarrynSkidSteerDrive::stop] RETRY COUNT EXCEEDED");
 }
 
+static const double PI = 3.14159265358979323846;
+
+double normalizeAngle(double angle) {
+    while (angle > PI) { angle -= 2.0 * PI; }
+    while (angle < -PI) { angle += 2.0 * PI; }
+    return angle;
+}
+
 void FarrynSkidSteerDrive::updateOdometry() {
     ROS_INFO("[FarrynSkidSteerDrive::updateOdometry %X] startup", gettid());
 	ros::Publisher odometryPublisher = rosNode->advertise<nav_msgs::Odometry>("odom", 50);
@@ -1256,123 +1264,84 @@ void FarrynSkidSteerDrive::updateOdometry() {
 	uint32_t sequenceCount = 0;
     ros::Time currentTime;
 	ros::Time lastTime = ros::Time::now();	
-	int32_t lastM1Encoder = getM1Encoder();
-	int32_t lastM2Encoder = getM2Encoder();
+ 	int32_t lastEncLeft = getM1Encoder();
+ 	int32_t lastEncRight = getM2Encoder();
+    double curX = 0.0;
+    double curY = 0.0;
+    double curTheta = 0.0;
 	nav_msgs::Odometry odom;
-	double poseEncoderX = 0.0;
-	double poseEncoderY = 0.0;
-	double poseEncoderTheta = 0.0;
+	double velX;
+	double velTheta;
 	ros::Rate rate(30);
 	int retry;
-	
+
+
 	while (rosNode->ok()) {
 		try {
 		    ros::spinOnce();
 		    currentTime = ros::Time::now();
-		    double dt = (currentTime - lastTime).toSec();
+		    double dTime = (currentTime - lastTime).toSec();
+  		    lastTime = currentTime;
 
-		    int32_t m1Encoder = getM1Encoder();
-		    int32_t m2Encoder = getM2Encoder();
-		    double m1DeltaDistance = (m1Encoder - lastM1Encoder) / quad_pulse_per_meter_;
-		    double m2DeltaDistance = (m2Encoder - lastM2Encoder) / quad_pulse_per_meter_;
-		    double theta = (m2DeltaDistance - m1DeltaDistance) / axle_width_;
-		    lastM1Encoder = m1Encoder;
-		    lastM2Encoder = m2Encoder;
+		    int32_t encLeft = getM1Encoder(); // Left motor.
+		    int32_t encRight = getM2Encoder(); // Right motor.
+		    double distLeft = (encLeft - lastEncLeft) / quad_pulse_per_meter_;  // In meters.
+		    double distRight = (encRight - lastEncRight) / quad_pulse_per_meter_;  // In meters.
+
+            lastEncLeft = encLeft;
+            lastEncRight = encRight;
+
+		    double dist = (distLeft + distRight) / 2.0;
 		    
-		    double s_ = (m1DeltaDistance + m2DeltaDistance) / 2.0;
-		    double theta_ =  (m2DeltaDistance - m1DeltaDistance) / (2.0 * axle_width_);
+		    double dTheta;
+		    if (distLeft == distRight) {
+		        dTheta = 0.0;
+		        curX = curX + dist * cos(curTheta);
+		        curY = curY + dist * sin(curTheta);
+            } else {
+                dTheta = (distRight - distLeft) / axle_width_;
+                double R = dist / dTheta;
+                curX = curX + R * (sin(dTheta + curTheta) - sin(curTheta));
+                curY = curY - R * (cos(dTheta + curTheta) - cos(curTheta));
+                curTheta = normalizeAngle(curTheta + dTheta);
+            }
 		    
-		    double dx = s_ * cos(/*poseEncoderTheta +*/ theta_);
-		    double dy = s_ * sin(/*poseEncoderTheta +*/ theta_);
-		    poseEncoderX += dx;
-		    poseEncoderY += dy;
-		    poseEncoderTheta += theta;
+		    if (abs(dTime) < 0.000001) {
+		        velX = 0.0;
+		        velTheta = 0.0;
+            } else {
+                velX = dist / dTime;
+                velTheta = dTheta / dTime;
+            }
 		    
-		    double w = theta / dt;
-		    double v = sqrt((dx * dx) + (dy * dy)) / dt;
-		    
-		    tf::Quaternion qt;
-		    tf::Vector3 vt;
-		    qt.setRPY(0, 0, poseEncoderTheta);
-		    vt = tf::Vector3(poseEncoderX, poseEncoderY, 0);
-        	ROS_INFO_COND(DEBUG, 
-        	               "    [FarrynSkidSteerDrive::updateOdometry %X] "
-        	                  "sequence: %d"
-        	                  ", dt: %f"
-        	                  ", m1Encoder: %d"
-        	                  ", m1DeltaDistance: %f"
-        	                  ", m2Encoder: %d"
-        	                  ", m2DeltaDistance: %f"
-        	                  ", theta: %f",
-        	               gettid(),
-        	               sequenceCount++,
-        	               dt,
-        	               m1Encoder,
-        	               m1DeltaDistance,
-        	               m2Encoder,
-        	               m2DeltaDistance,
-        	               theta);
-        	ROS_INFO_COND(DEBUG, 
-        	               "    [FarrynSkidSteerDrive::updateOdometry %X] "
-        	                  "dx: %f"
-        	                  ", dy: %f"
-        	                  ", theta: %f"
-        	                  ", poseEncoderX: %f"
-        	                  ", poseEncoderY: %f"
-        	                  ", poseEncoderTheta: %f"
-        	                  ", w: %f"
-        	                  ", v: %f",
-        	               gettid(),
-        	               dx,
-        	               dy,
-        	               theta,
-        	               poseEncoderX,
-        	               poseEncoderY,
-        	               poseEncoderTheta,
-        	               w,
-        	               v);
-		    
-		    odom.pose.pose.position.x = vt.x();
-		    odom.pose.pose.position.y = vt.y();
-		    odom.pose.pose.position.z = vt.z();
-		    odom.pose.pose.orientation.x = qt.x();
-		    odom.pose.pose.orientation.y = qt.y();
-		    odom.pose.pose.orientation.z = qt.z();
-		    odom.pose.pose.orientation.w = qt.w();
-		    odom.pose.covariance[0] = 0.00001;
-		    odom.pose.covariance[7] = 0.00001;
-		    odom.pose.covariance[14] = 1000000000000.0;
-		    odom.pose.covariance[21] = 1000000000000.0;
-		    odom.pose.covariance[28] = 1000000000000.0;
-		    odom.pose.covariance[35] = 0.00001;
 		    odom.header.stamp = currentTime;
 		    odom.header.frame_id = "odom";
 		    odom.child_frame_id = "base_link";
-		    
-		    odom.twist.twist.angular.z = w;
-		    odom.twist.twist.linear.x = dx / dt;
-		    odom.twist.twist.linear.y = dy / dt;
 
+		    odom.pose.pose.position.x = curX;
+		    odom.pose.pose.position.y = curY;
+		    odom.pose.pose.position.z = 0.0;
+		    odom.pose.pose.orientation = tf::createQuaternionMsgFromYaw(curTheta);
+		    odom.pose.covariance[0] = 0.01;
+		    odom.pose.covariance[7] = 0.01;
+		    odom.pose.covariance[14] = 99999;
+		    odom.pose.covariance[21] = 99999;
+		    odom.pose.covariance[28] = 99999;
+		    odom.pose.covariance[35] = 0.01;
+		    
+		    odom.twist.twist.angular.z = velTheta;
+		    odom.twist.twist.linear.x = velX;
+		    odom.twist.twist.linear.y = 0.0;
+		    odom.twist.covariance = odom.pose.covariance;
             odometryPublisher.publish(odom);
             
-            geometry_msgs::Quaternion odom_quat = tf::createQuaternionMsgFromYaw(poseEncoderTheta);
-            geometry_msgs::TransformStamped odomTrans;
-            odomTrans.header.stamp = currentTime;
-            odomTrans.header.frame_id = "odom";
-            odomTrans.child_frame_id = "base_link";
-            odomTrans.transform.translation.x = poseEncoderX;
-            odomTrans.transform.translation.y = poseEncoderY;
-            odomTrans.transform.translation.z = 0.0;
-            odomTrans.transform.rotation = odom_quat;
-            odomBroadcaster.sendTransform(odomTrans);
-
-//             laserBroadcaster.sendTransform(
-//                 tf::StampedTransform(
-//                     tf::Transform(tf::Quaternion(0, 0, 0, 1), tf::Vector3(0.1, 0.0, 0.1)),
-//                     ros::Time::now(),
-//                     "base_link", 
-//                     "base_laser"));
-  		    lastTime = currentTime;
+            tf::Transform transform;
+            transform.setOrigin(tf::Vector3(curX, curY, 0));
+            transform.setRotation(tf::createQuaternionFromYaw(curTheta));
+            odomBroadcaster.sendTransform(tf::StampedTransform(transform,
+                                                               ros::Time(odom.header.stamp),
+                                                               odom.header.frame_id,
+                                                               odom.child_frame_id));
 		    rate.sleep();
 		} catch (TRoboClawException* e) {
 			ROS_ERROR_COND(DEBUG, "[FarrynSkidSteerDrive::roboClawStatusReader %X] Exception: %s", gettid(), e->what());
