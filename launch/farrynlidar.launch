@@ -1,5 +1,6 @@
 <launch>
   <node name="farryn_controller_node" pkg="farryn_controller"  type="farryn_controller_node" output="screen">
+    <!--param name="motorUSBPort"      type="string" value="/dev/ttyAMA0"/-->
     <param name="motorUSBPort"      type="string" value="$(env ROBOCLAW_DEV)"/>
   	<rosparam command="load" file="$(find farryn_controller)/cfg/farryn_controller.yaml"/>
   </node>

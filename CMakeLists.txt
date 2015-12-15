@@ -146,7 +146,7 @@ add_dependencies(farryn_controller_node farrynController.cpp farrySkidSteerDrive
 
 ## Specify libraries to link a library or executable target against
 target_link_libraries(farryn_controller_node
-  ${catkin_LIBRARIES} ${Boost_LIBRARIES}
+  ${catkin_LIBRARIES} ${Boost_LIBRARIES} wiringPi
 )
 
 #############

@@ -203,7 +203,7 @@ private:
 
 	EncodeResult getEncoderCommandResult(uint8_t command);
 
-	uint32_t getLongCont(uint8_t& checksum);
+	uint32_t getLongCont();
 	
 	int32_t getSpeedResult(uint8_t command);
 

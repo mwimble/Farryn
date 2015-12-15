@@ -6,7 +6,6 @@ M2_I: 14.51053
 M1_QPPS: 2810
 M2_QPPS: 2810
 AXLE_WIDTH: 5.0
-motor_usb_port: /dev/ttyACM0
 
 KP_velocity: 15
 frw_vel_topic: /summit_xl/joint_frw_velocity_controller/command
